@@ -273,17 +273,7 @@ def correlations_page():
     return render_template("correlations.html", name=DISPLAY_NAME)
 
 
-@app.route("/api/correlations")
-def correlations_api():
-    import numpy as np
-    from scipy import stats
-    from scipy.stats import entropy as _entropy
-    from sklearn.metrics import mutual_info_score
-
-    lag = int(request.args.get("lag", 0))  # 0 = same day, 1 = next day
-
-    # Build a daily feature matrix from all tables
-    # 1. Sleep metrics
+def build_daily_feature_matrix():
     sleep = {r["day"]: r for r in q(
         "SELECT day, average_hrv, lowest_heart_rate, average_heart_rate,"
         " total_sleep_duration, efficiency, latency,"
@@ -293,7 +283,6 @@ def correlations_api():
         " FROM sleep_periods WHERE type = 'long_sleep' ORDER BY day"
     )}
 
-    # 2. Daily scores
     sleep_scores = {r["day"]: r["score"] for r in q("SELECT day, score FROM daily_sleep")}
     readiness = {r["day"]: r for r in q(
         "SELECT day, score, temperature_deviation FROM daily_readiness"
@@ -306,7 +295,6 @@ def correlations_api():
         "SELECT day, vascular_age FROM daily_cardiovascular_age WHERE vascular_age IS NOT NULL"
     )}
 
-    # 3. Nutrition per day
     meals_by_day = {}
     meal_timing = {}
     for r in q(
@@ -336,11 +324,22 @@ def correlations_api():
             meal_timing[r["day"]] = {
                 "first_meal_hour": round(first.hour + first.minute / 60, 2),
                 "last_meal_hour": round(last.hour + last.minute / 60, 2),
+                "eating_window_hours": round((last - first).total_seconds() / 3600, 2),
             }
         except Exception:
             pass
 
-    # 4. Substances per day
+    workouts_by_day = {r["day"]: r for r in q(
+        "SELECT day, COUNT(*) AS workout_count,"
+        " SUM(duration) AS workout_duration,"
+        " SUM(calories) AS workout_calories"
+        " FROM workouts GROUP BY day"
+    )}
+    sets_by_day = {r["workout_day"]: r for r in q(
+        "SELECT workout_day, COUNT(*) AS strength_sets"
+        " FROM workout_sets GROUP BY workout_day"
+    )}
+
     subs_by_day = {}
     for r in q(
         "SELECT substr(logged_at,1,10) AS day, substance, COUNT(*) AS cnt,"
@@ -356,12 +355,10 @@ def correlations_api():
             "total_amount": r["total_amount"], "active_dose": r["active_dose"],
         }
 
-    # Collect all days
     all_days = sorted(set(
         set(sleep) | set(sleep_scores) | set(readiness) | set(activity)
     ))
 
-    # Define features
     features = [
         "sleep_score", "readiness_score", "activity_score",
         "hrv", "lowest_hr", "avg_hr",
@@ -370,15 +367,16 @@ def correlations_api():
         "bedtime_hour", "temp_deviation",
         "steps", "active_cal", "sedentary_hrs",
         "spo2", "vascular_age",
-        "calories", "protein_g", "fat_g", "fiber_g", "sugar_g", "sat_fat_g",
-        "meal_count", "last_meal_hour",
+        "calories", "protein_g", "carbs_g", "fat_g", "fiber_g", "sugar_g", "sat_fat_g",
+        "sodium_mg", "potassium_mg", "magnesium_mg",
+        "meal_count", "first_meal_hour", "last_meal_hour", "eating_window_hours",
         "nutrition_score",
+        "workout_count", "workout_minutes", "workout_calories", "strength_sets",
         "weed_count", "weed_g", "thc_mg",
         "nicotine_count", "nicotine_mg",
         "alcohol_count", "alcohol_ml", "pure_alcohol_ml",
     ]
 
-    # Build rows
     rows = []
     for day in all_days:
         row = {}
@@ -387,6 +385,8 @@ def correlations_api():
         a = activity.get(day, {})
         m = meals_by_day.get(day, {})
         mt = meal_timing.get(day, {})
+        w = workouts_by_day.get(day, {})
+        ws = sets_by_day.get(day, {})
         sb = subs_by_day.get(day, {})
 
         row["sleep_score"] = sleep_scores.get(day)
@@ -421,12 +421,18 @@ def correlations_api():
         row["vascular_age"] = cardio_age.get(day)
         row["calories"] = m.get("cal")
         row["protein_g"] = m.get("protein")
+        row["carbs_g"] = m.get("carbs")
         row["fat_g"] = m.get("fat")
         row["fiber_g"] = m.get("fiber")
         row["sugar_g"] = m.get("sugar")
         row["sat_fat_g"] = m.get("sat_fat")
+        row["sodium_mg"] = m.get("sodium")
+        row["potassium_mg"] = m.get("potassium")
+        row["magnesium_mg"] = m.get("magnesium")
         row["meal_count"] = m.get("meal_count")
+        row["first_meal_hour"] = mt.get("first_meal_hour")
         row["last_meal_hour"] = mt.get("last_meal_hour")
+        row["eating_window_hours"] = mt.get("eating_window_hours")
         if m.get("cal"):
             ns_input = {
                 "calories": m.get("cal"), "protein_g": m.get("protein"),
@@ -442,6 +448,10 @@ def correlations_api():
             row["nutrition_score"] = compute_nutrition_score(ns_input)
         else:
             row["nutrition_score"] = None
+        row["workout_count"] = w.get("workout_count") or 0
+        row["workout_minutes"] = round(w["workout_duration"] / 60, 1) if w.get("workout_duration") else 0
+        row["workout_calories"] = w.get("workout_calories") or 0
+        row["strength_sets"] = ws.get("strength_sets") or 0
         weed = sb.get("weed", {}) if sb else {}
         nic = sb.get("nicotine", {}) if sb else {}
         alc = sb.get("alcohol", {}) if sb else {}
@@ -455,6 +465,19 @@ def correlations_api():
         row["pure_alcohol_ml"] = round(alc["active_dose"], 1) if alc.get("active_dose") else 0
 
         rows.append(row)
+
+    return all_days, features, rows
+
+
+@app.route("/api/correlations")
+def correlations_api():
+    import numpy as np
+    from scipy import stats
+    from scipy.stats import entropy as _entropy
+    from sklearn.metrics import mutual_info_score
+
+    lag = int(request.args.get("lag", 0))  # 0 = same day, 1 = next day
+    all_days, features, rows = build_daily_feature_matrix()
 
     # Build day-indexed lookup for lagged correlations
     day_rows = {day: row for day, row in zip(all_days, rows)}
@@ -539,6 +562,156 @@ def correlations_api():
         "counts": counts_matrix,
         "scatter": scatter_data,
         "total_days": len(all_days),
+    })
+
+
+@app.route("/api/granger")
+def granger_api():
+    import numpy as np
+    from scipy import stats
+
+    max_lag = max(1, min(int(request.args.get("max_lag", 2)), 3))
+    min_obs = 12
+    mature_days = 60
+    all_days, features, rows = build_daily_feature_matrix()
+    day_rows = {day: row for day, row in zip(all_days, rows)}
+
+    core_predictors = [
+        "thc_mg", "weed_count",
+        "pure_alcohol_ml", "alcohol_count",
+        "nicotine_mg", "nicotine_count",
+        "last_meal_hour", "eating_window_hours",
+        "workout_count", "workout_minutes", "workout_calories", "strength_sets",
+        "steps", "active_cal", "sedentary_hrs", "bedtime_hour",
+    ]
+    expanded_predictors = [
+        "calories", "protein_g", "carbs_g", "fat_g", "fiber_g",
+        "sugar_g", "sat_fat_g", "sodium_mg", "potassium_mg", "magnesium_mg",
+        "meal_count", "first_meal_hour", "nutrition_score",
+    ]
+    predictors = core_predictors + expanded_predictors
+    outcomes = [
+        "readiness_score", "sleep_score", "hrv", "lowest_hr",
+        "efficiency", "rem_pct", "deep_pct",
+    ]
+
+    def fmt_p(value):
+        if value is None:
+            return None
+        if value < 0.0001:
+            return "<0.0001"
+        return round(float(value), 4)
+
+    def fit_model(y, x_cols):
+        x = np.column_stack([np.ones(len(y))] + x_cols)
+        coef, _, _, _ = np.linalg.lstsq(x, y, rcond=None)
+        resid = y - x @ coef
+        return float(np.sum(resid ** 2)), coef
+
+    results = []
+    for predictor in predictors:
+        if predictor not in features:
+            continue
+        for outcome in outcomes:
+            if outcome not in features or predictor == outcome:
+                continue
+            best = None
+            for lag in range(1, max_lag + 1):
+                pairs = []
+                for idx in range(lag, len(all_days)):
+                    day = all_days[idx]
+                    current_y = day_rows[day][outcome]
+                    if current_y is None:
+                        continue
+                    y_lags = []
+                    x_lags = []
+                    complete = True
+                    for back in range(1, lag + 1):
+                        lag_day = all_days[idx - back]
+                        y_lag = day_rows[lag_day][outcome]
+                        x_lag = day_rows[lag_day][predictor]
+                        if y_lag is None or x_lag is None:
+                            complete = False
+                            break
+                        y_lags.append(float(y_lag))
+                        x_lags.append(float(x_lag))
+                    if complete:
+                        pairs.append((float(current_y), y_lags, x_lags))
+
+                n = len(pairs)
+                if n < min_obs:
+                    continue
+                y = np.array([p[0] for p in pairs], dtype=float)
+                y_cols = [np.array([p[1][i] for p in pairs], dtype=float) for i in range(lag)]
+                x_cols = [np.array([p[2][i] for p in pairs], dtype=float) for i in range(lag)]
+                if np.std(y) == 0 or any(np.std(col) == 0 for col in x_cols):
+                    continue
+
+                restricted_sse, _ = fit_model(y, y_cols)
+                full_sse, full_coef = fit_model(y, y_cols + x_cols)
+                df_num = lag
+                df_den = n - (1 + len(y_cols) + len(x_cols))
+                if df_den <= 0 or full_sse <= 0:
+                    continue
+                f_stat = ((restricted_sse - full_sse) / df_num) / (full_sse / df_den)
+                if f_stat < 0:
+                    f_stat = 0
+                p_val = float(stats.f.sf(f_stat, df_num, df_den))
+                improvement = (restricted_sse - full_sse) / restricted_sse if restricted_sse > 0 else 0
+                exposure_days = sum(
+                    1 for day in all_days
+                    if day_rows[day].get(predictor) not in (None, 0)
+                )
+                x_coef = float(np.sum(full_coef[1 + len(y_cols):]))
+                sparse = exposure_days < 10 and predictor.endswith(("_mg", "_count", "_ml"))
+                tier = "watchlist" if sparse else ("core" if predictor in core_predictors else "expanded")
+
+                candidate = {
+                    "predictor": predictor,
+                    "outcome": outcome,
+                    "tier": tier,
+                    "lag": lag,
+                    "n": n,
+                    "exposure_days": exposure_days,
+                    "f": round(float(f_stat), 3),
+                    "p": fmt_p(p_val),
+                    "sort_p": p_val,
+                    "improvement_pct": round(max(0, improvement) * 100, 1),
+                    "direction": "higher" if x_coef > 0 else "lower",
+                    "status": "sparse" if sparse else ("maturing" if len(all_days) >= mature_days else "exploratory"),
+                    "note": "Sparse exposure: useful to watch, not enough exposed days to trust yet."
+                        if sparse else (
+                            "Exploratory: interpret directionally until 60+ daily observations."
+                            if len(all_days) < mature_days else
+                            "Mature sample: still observational, but time-series tests are more stable."
+                        ),
+                }
+                if best is None or candidate["sort_p"] < best["sort_p"]:
+                    best = candidate
+            if best:
+                del best["sort_p"]
+                results.append(best)
+
+    results.sort(key=lambda r: (
+        0 if r["p"] == "<0.0001" else (r["p"] if isinstance(r["p"], float) else 1),
+        -r["improvement_pct"],
+    ))
+    tiered = {
+        "core": [r for r in results if r["tier"] == "core"][:12],
+        "expanded": [r for r in results if r["tier"] == "expanded"][:12],
+        "watchlist": [r for r in results if r["tier"] == "watchlist"][:12],
+    }
+    return jsonify({
+        "total_days": len(all_days),
+        "mature_days": mature_days,
+        "max_lag": max_lag,
+        "min_obs": min_obs,
+        "predictors": predictors,
+        "core_predictors": core_predictors,
+        "expanded_predictors": expanded_predictors,
+        "outcomes": outcomes,
+        "results": results[:40],
+        "tiered": tiered,
     })
 
 

@@ -13,6 +13,18 @@
   .plbl{margin-bottom:8px}
   .stats{display:flex;gap:16px;font-size:.75rem;color:#64748b;margin-bottom:10px}
   .stats b{color:#94a3b8}
+  .advanced-panel{margin-top:12px}
+  .subtle{font-size:.72rem;color:#64748b;line-height:1.5}
+  .granger-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px;margin-top:10px}
+  .granger-tier{margin-top:12px}
+  .granger-tier-title{font-size:.68rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px}
+  .granger-row{border:1px solid #1e1e28;padding:10px;background:#101015}
+  .granger-title{font-size:.72rem;color:#cbd5e1;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .granger-dir-pos{color:#22c55e}
+  .granger-dir-neg{color:#ef4444}
+  .granger-meta{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;font-size:.62rem;color:#64748b}
+  .granger-meta b{display:block;color:#94a3b8;font-size:.7rem;margin-top:2px}
+  .badge{font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;color:#fbbf24;border:1px solid #3f3414;padding:2px 6px}
 
   /* Heatmap */
   .heatmap-wrap{overflow:auto;max-height:80vh}
@@ -62,6 +74,17 @@
   <div class="heatmap-wrap" id="heatmap-wrap"></div>
 </div>
 
+<div class="panel advanced-panel">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <div>
+      <div class="plbl" style="margin-bottom:3px">Advanced Lagged Prediction</div>
+      <div class="subtle" id="granger-summary">Loading Granger-style tests...</div>
+    </div>
+    <span class="badge" id="granger-badge">Exploratory</span>
+  </div>
+  <div id="granger-grid"></div>
+</div>
+
 <div id="scatter-overlay" onclick="if(event.target===this)closeScatter()">
   <div id="scatter-box">
     <button id="scatter-close" onclick="closeScatter()">&times;</button>
@@ -100,13 +123,23 @@ const DESCRIPTIONS = {
   vascular_age:'Oura estimated cardiovascular age (years)',
   calories:'Total calories consumed from logged meals',
   protein_g:'Total protein consumed (g)',
+  carbs_g:'Total carbohydrates consumed (g)',
   fat_g:'Total fat consumed (g)',
   fiber_g:'Total fiber consumed (g)',
   sugar_g:'Total sugar consumed (g)',
   sat_fat_g:'Total saturated fat consumed (g)',
+  sodium_mg:'Total sodium consumed (mg)',
+  potassium_mg:'Total potassium consumed (mg)',
+  magnesium_mg:'Total magnesium consumed (mg)',
   meal_count:'Number of meals logged that day',
+  first_meal_hour:'Hour of first meal (decimal)',
   last_meal_hour:'Hour of last meal (decimal)',
+  eating_window_hours:'Hours between first and last logged meal',
   nutrition_score:'Composite nutrition quality score (0-100) based on macro/micro targets',
+  workout_count:'Number of Oura workouts that day',
+  workout_minutes:'Total workout duration that day',
+  workout_calories:'Total workout calories that day',
+  strength_sets:'Number of manually logged strength sets that day',
   weed_count:'Number of weed sessions logged that day',
   weed_g:'Total grams of weed consumed that day',
   thc_mg:'Total THC consumed that day (mg), derived from amount × potency',
@@ -125,10 +158,16 @@ const NICE_NAMES = {
   bedtime_hour:'Bedtime', temp_deviation:'Temp Dev',
   steps:'Steps', active_cal:'Active Cal', sedentary_hrs:'Sedentary Hrs',
   spo2:'SpO2', vascular_age:'Vascular Age',
-  calories:'Calories', protein_g:'Protein', fat_g:'Fat', fiber_g:'Fiber',
+  calories:'Calories', protein_g:'Protein', carbs_g:'Carbs', fat_g:'Fat', fiber_g:'Fiber',
   sugar_g:'Sugar', sat_fat_g:'Sat Fat',
-  meal_count:'Meals/Day', last_meal_hour:'Last Meal',
+  sodium_mg:'Sodium', potassium_mg:'Potassium', magnesium_mg:'Magnesium',
+  meal_count:'Meals/Day', first_meal_hour:'First Meal', last_meal_hour:'Last Meal',
+  eating_window_hours:'Eating Window',
   nutrition_score:'Nutrition Score',
+  workout_count:'Workouts',
+  workout_minutes:'Workout Min',
+  workout_calories:'Workout Cal',
+  strength_sets:'Strength Sets',
   weed_count:'Weed Sessions',
   weed_g:'Weed (g)',
   thc_mg:'THC (mg)',
@@ -241,6 +280,48 @@ function fetchData(lag) {
   })
 }
 
+function renderGranger(data) {
+  const mature = data.total_days >= data.mature_days
+  $('granger-badge').textContent = mature ? 'Maturing' : 'Exploratory'
+  $('granger-summary').innerHTML = `<b>${data.total_days}</b> daily observations · max lag <b>${data.max_lag}</b> day(s) · `
+    + `uncorrected F-tests · results are most stable at <b>${data.mature_days}+</b> days`
+  const tiered = data.tiered || {core:data.results || [], expanded:[], watchlist:[]}
+  if (!data.results.length) {
+    $('granger-grid').innerHTML = '<div class="subtle">No eligible Granger-style tests yet. More daily observations or variable movement needed.</div>'
+    return
+  }
+  const renderRows = rows => rows.map(r => {
+    const pred = NICE_NAMES[r.predictor] || r.predictor
+    const out = NICE_NAMES[r.outcome] || r.outcome
+    const pColor = typeof r.p === 'number' && r.p < 0.05 ? '#22c55e' : '#94a3b8'
+    const direction = r.direction === 'higher' ? '+' : '-'
+    const dirClass = r.direction === 'higher' ? 'granger-dir-pos' : 'granger-dir-neg'
+    return `<div class="granger-row" title="${r.note}">`
+      + `<div class="granger-title">${pred} → <span class="${dirClass}">${direction}</span> ${out}</div>`
+      + `<div class="granger-meta">`
+      + `<span>lag<b>${r.lag}d</b></span>`
+      + `<span>n<b>${r.n}</b></span>`
+      + `<span>exp<b>${r.exposure_days}</b></span>`
+      + `<span>F<b>${r.f}</b></span>`
+      + `<span>p<b style="color:${pColor}">${r.p}</b></span>`
+      + `<span>gain<b>${r.improvement_pct}%</b></span>`
+      + `</div></div>`
+  }).join('')
+  const sections = [
+    ['Core Signals', tiered.core || []],
+    ['Expanded Signals', tiered.expanded || []],
+    ['Sparse / Watchlist', tiered.watchlist || []],
+  ].filter(([_, rows]) => rows.length)
+  $('granger-grid').innerHTML = sections.map(([title, rows]) =>
+    `<div class="granger-tier"><div class="granger-tier-title">${title}</div>`
+      + `<div class="granger-grid">${renderRows(rows)}</div></div>`
+  ).join('')
+}
+
+function fetchGranger() {
+  fetch('/api/granger?max_lag=2').then(r=>r.json()).then(renderGranger)
+}
+
 function showScatter(key) {
   const d = DATA.scatter[key]
   if (!d) return
@@ -290,6 +371,7 @@ function closeScatter() {
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeScatter() })
 
 fetchData(0)
+fetchGranger()
 </script>
 </body>
 </html>

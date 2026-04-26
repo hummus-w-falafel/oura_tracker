@@ -164,6 +164,23 @@ targets:
         self.assertIn("nicotine_count", payload["features"])
         self.assertIn("nicotine_mg", payload["features"])
 
+    def test_dashboard_granger_api_smoke(self):
+        with self.db.get_conn() as conn:
+            for idx, day in enumerate(["2026-04-20", "2026-04-21", "2026-04-22", "2026-04-23", "2026-04-24", "2026-04-25"]):
+                conn.execute("INSERT INTO daily_sleep (day, score) VALUES (?, ?)", (day, 70 + idx))
+                conn.execute("INSERT INTO daily_readiness (day, score) VALUES (?, ?)", (day, 65 + idx))
+                conn.execute(
+                    "INSERT INTO sleep_periods (id, day, type, total_sleep_duration, average_hrv, lowest_heart_rate) VALUES (?, ?, ?, ?, ?, ?)",
+                    (f"g{idx}", day, "long_sleep", 25200, 40 + idx, 55 - idx),
+                )
+
+        client = self.dashboard.app.test_client()
+        response = client.get("/api/granger")
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data)
+        self.assertIn("mature_days", payload)
+        self.assertIn("results", payload)
+
 
 if __name__ == "__main__":
     unittest.main()
