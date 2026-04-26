@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Level</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='base.css') }}">
+<style>
+  body{padding:12px 14px;max-width:600px;margin:0 auto}
+  header{margin-bottom:20px}
+  .panel{border:1px solid #1e1e28;padding:16px}
+
+  /* Level display */
+  .level-num{font-size:2.2rem;font-weight:700;color:#e2e8f0;letter-spacing:.05em}
+  .level-label{font-size:.6rem;color:#64748b;text-transform:uppercase;letter-spacing:.1em;margin-bottom:2px}
+  .xp-text{font-size:.6rem;color:#64748b;margin-top:4px}
+  .progress-track{background:#1a1a24;border-radius:0;height:18px;overflow:hidden;margin-top:8px;position:relative}
+  .progress-fill{background:linear-gradient(90deg,#0891b2,#22d3ee);height:100%;border-radius:0;transition:width .5s;position:absolute;left:0;top:0}
+  .progress-today{background:rgba(34,211,238,0.35);height:100%;border-radius:0;transition:width .5s;position:absolute;top:0}
+
+  /* Rank */
+  .rank{font-size:.7rem;font-weight:700;padding:4px 14px;border-radius:0;border:1px solid #334155;letter-spacing:.08em}
+
+  /* Stat bars */
+  .stat-row{cursor:pointer;padding:8px 0;border-bottom:1px solid #1a1a24;transition:background .1s}
+  .stat-row:last-child{border-bottom:none}
+  .stat-row:hover{background:#1a1a20}
+  .stat-header{display:flex;align-items:center;gap:10px}
+  .stat-name{width:32px;font-size:.65rem;font-weight:600;color:#94a3b8}
+  .stat-bar-wrap{flex:1;background:#1a1a24;border-radius:0;height:16px;overflow:hidden;position:relative}
+  .stat-bar{background:linear-gradient(90deg,#0891b2,#22d3ee);height:100%;border-radius:0;transition:width .5s}
+  .stat-score{position:absolute;right:8px;top:2px;font-size:.55rem;color:#e2e8f0;font-weight:500}
+  .stat-xp{width:45px;text-align:right;font-size:.55rem;color:#64748b}
+
+  /* Expanded detail */
+  .stat-detail{display:none;padding:8px 0 4px 42px;font-size:.55rem;color:#64748b}
+  .stat-detail.open{display:block}
+  .detail-row{display:flex;justify-content:space-between;align-items:center;padding:3px 0;cursor:pointer}
+  .detail-row:hover{background:#1a1a20}
+  .detail-bar-wrap{width:120px;background:#1a1a24;border-radius:0;height:8px;overflow:hidden;margin:0 8px}
+  .detail-bar{background:linear-gradient(90deg,#0891b2,#22d3ee);height:100%;border-radius:0}
+  .detail-name{flex:1;color:#94a3b8}
+  .detail-val{width:30px;text-align:right;color:#e2e8f0}
+  .detail-weight{width:30px;text-align:right;color:#475569;font-size:.5rem}
+  .detail-chart{height:80px;margin:4px 0 8px}
+
+  /* XP summary */
+  .xp-summary{font-size:.6rem;color:#64748b;text-align:center;margin-top:4px}
+  .xp-summary b{color:#94a3b8}
+  .xp-summary b.xp-pos{color:#22c55e}
+  .xp-summary b.xp-neg{color:#ef4444}
+
+  /* History chart */
+  #history-chart{width:100%;height:250px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>{{ name }}</h1>
+  <div class="nav">
+    <a href="/status" class="on">Level</a>
+    <a href="/">Dashboard</a>
+    <a href="/correlations">Correlations</a>
+  </div>
+</header>
+
+<div class="panel" id="main-panel">
+  <!-- Level + Rank header -->
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+    <div>
+      <div class="level-label">Level</div>
+      <div class="level-num" id="lv-num"></div>
+    </div>
+    <div class="rank" id="lv-rank"></div>
+  </div>
+
+  <!-- Big XP bar -->
+  <div class="xp-text" id="lv-xp"></div>
+  <div class="progress-track"><div class="progress-fill" id="lv-bar"></div><div class="progress-today" id="lv-bar-today"></div></div>
+
+  <!-- Stat bars -->
+  <div id="stat-list" style="margin-top:16px"></div>
+
+  <!-- XP summary -->
+  <div class="xp-summary" id="xp-summary"></div>
+</div>
+
+<!-- History panel -->
+<div class="panel" id="history-panel" style="display:none">
+  <div style="font-size:.6rem;color:#64748b;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">7-Day History</div>
+  <div id="history-chart"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.2/dist/apexcharts.min.js"></script>
+<script>
+const $ = id => document.getElementById(id)
+
+const STAT_NAMES = { vit:'VIT', str:'STR', end:'END', nut:'NUT', dis:'DIS' }
+const STAT_FULL = { vit:'Vitality', str:'Strength', end:'Endurance', nut:'Nutrition', dis:'Discipline' }
+const COMP_NAMES = {
+  sleep:'Sleep Score', readiness:'Readiness', hrv:'HRV vs Baseline', rhr:'Resting HR vs Baseline',
+  overload:'Progressive Overload', volume:'Training Volume', recovery:'Post-Workout Recovery',
+  steps:'Daily Steps', active_cal:'Active Calories', rhr_trend:'Resting HR Trend', vo2:'VO2 Max',
+  nutrition:'Nutrition Score', protein_dist:'Protein Distribution', calorie_adequacy:'Calorie Adequacy (Training)',
+  bedtime:'Bedtime Consistency', training:'Training Adherence', fasting:'Fasting Window'
+}
+const COMP_WEIGHTS = {
+  vit: {sleep:30, readiness:30, hrv:25, rhr:15},
+  str: {overload:35, volume:35, recovery:30},
+  end: {steps:30, active_cal:20, rhr_trend:25, vo2:25},
+  nut: {nutrition:70, protein_dist:30},  // overridden dynamically on training days
+  dis: {bedtime:40, training:30, fasting:30}
+}
+
+let historyChart = null
+let HISTORY = []
+let sparkCharts = {}
+
+function render(d) {
+  if (!d || !d.today) return
+  HISTORY = d.history || []
+
+  // Level
+  $('lv-num').textContent = d.level
+  const pct = d.xp_needed > 0 ? Math.min(100, d.xp_progress / d.xp_needed * 100) : 100
+  const todayNet = d.today.net_xp
+  const priorPct = d.xp_needed > 0 ? Math.min(100, Math.max(0, (d.xp_progress - todayNet) / d.xp_needed * 100)) : 100
+  $('lv-xp').textContent = `${Math.round(d.xp_progress)} / ${d.xp_needed} XP to next level`
+  $('lv-bar').style.width = Math.min(pct, priorPct) + '%'
+  $('lv-bar-today').style.left = Math.min(pct, priorPct) + '%'
+  $('lv-bar-today').style.width = Math.max(0, pct - priorPct) + '%'
+
+  // Rank
+  $('lv-rank').textContent = `RANK ${d.rank}`
+
+  // Stats
+  let html = ''
+  for (const key of ['vit','str','end','nut','dis']) {
+    const stat = d.today.stats[key]
+    const score = stat && stat.score != null ? stat.score : 0
+    const xp = stat && stat.score != null ? '+' + (stat.score / 5).toFixed(1) : '—'
+    const comps = stat ? stat.components : {}
+    const rawData = stat ? (stat.raw || {}) : {}
+    let weights = COMP_WEIGHTS[key]
+    if (key === 'nut') {
+      weights = stat && stat.is_training_day
+        ? {nutrition:50, protein_dist:30, calorie_adequacy:20}
+        : {nutrition:70, protein_dist:30, calorie_adequacy:null}
+    }
+
+    html += `<div class="stat-row" onclick="this.querySelector('.stat-detail').classList.toggle('open')">`
+    html += `<div class="stat-header">`
+    html += `<span class="stat-name">${STAT_NAMES[key]}</span>`
+    html += `<div class="stat-bar-wrap"><div class="stat-bar" style="width:${score}%"></div><span class="stat-score">${score > 0 ? Math.round(score) : '—'}</span></div>`
+    html += `<span class="stat-xp">${xp}</span>`
+    html += `</div>`
+
+    // Detail panel
+    html += `<div class="stat-detail">`
+    html += `<div style="color:#475569;margin-bottom:4px;font-size:.5rem">${STAT_FULL[key]}</div>`
+    // For NUT, enforce display order explicitly
+    const compEntries = key === 'nut'
+      ? ['nutrition','protein_dist','calorie_adequacy'].map(c => [c, comps[c] !== undefined ? comps[c] : null])
+      : Object.entries(comps)
+    for (const [comp, val] of compEntries) {
+      const wRaw = weights[comp]
+      const w = (wRaw === null || wRaw === undefined) ? null : wRaw
+      const v = val != null ? Math.round(val) : '—'
+      const barW = val != null ? val : 0
+      const rawTxt = rawData[comp] || ''
+      const chartId = `spark-${key}-${comp}`
+      html += `<div class="detail-row" onclick="event.stopPropagation();toggleSpark('${chartId}','${key}','${comp}')">`
+      html += `<span class="detail-name">${COMP_NAMES[comp] || comp}</span>`
+      html += `<div class="detail-bar-wrap"><div class="detail-bar" style="width:${barW}%"></div></div>`
+      html += `<span class="detail-val">${v}</span>`
+      html += `<span class="detail-weight">${w !== null && w !== undefined ? w + '%' : '—'}</span>`
+      html += `</div>`
+      if (rawTxt) html += `<div style="color:#475569;font-size:.45rem;padding:1px 0 3px">${rawTxt}</div>`
+      html += `<div class="detail-chart" id="${chartId}" style="display:none"></div>`
+    }
+    html += `</div></div>`
+  }
+  $('stat-list').innerHTML = html
+
+  // XP summary
+  const t = d.today
+  const netCls = t.net_xp >= 0 ? 'xp-pos' : 'xp-neg'
+  $('xp-summary').innerHTML =
+    `Today: <b class="xp-pos">+${t.daily_xp}</b> · Decay: <b class="xp-neg">-${t.decay}</b> · Net: <b class="${netCls}">${t.net_xp >= 0 ? '+' : ''}${t.net_xp}</b> · Total: <b>${Math.round(d.total_xp)}</b> XP`
+
+  // History chart
+  if (d.history && d.history.length > 1) {
+    $('history-panel').style.display = ''
+    renderHistoryChart(d.history)
+  }
+}
+
+function renderHistoryChart(history) {
+  const keys = ['vit','str','end','nut','dis']
+  const series = [{
+    name: 'Net XP',
+    type: 'column',
+    data: history.map(h => ({
+      x: h.day,
+      y: h.net_xp,
+      fillColor: '#22d3ee'
+    }))
+  }]
+
+  // Build tooltip data
+  const tooltipData = {}
+  history.forEach(h => {
+    tooltipData[h.day] = h
+  })
+
+  if (historyChart) historyChart.destroy()
+  historyChart = new ApexCharts($('history-chart'), {
+    chart: {
+      type: 'bar',
+      height: 230,
+      background: 'transparent',
+      toolbar: { show: false },
+      fontFamily: 'Orbitron,sans-serif',
+      animations: { enabled: false }
+    },
+    theme: { mode: 'dark' },
+    series: series,
+    plotOptions: {
+      bar: { borderRadius: 0, columnWidth: '50%' }
+    },
+    colors: ['#22d3ee'],
+    dataLabels: { enabled: false },
+    xaxis: {
+      type: 'category',
+      labels: {
+        style: { colors: '#475569', fontSize: '8px' },
+        formatter: v => v ? v.slice(5) : ''
+      }
+    },
+    yaxis: {
+      labels: { style: { colors: '#475569', fontSize: '9px' } },
+      title: { text: 'Net XP', style: { color: '#475569', fontSize: '9px' } }
+    },
+    grid: { borderColor: '#1a1a24', strokeDashArray: 4 },
+    tooltip: {
+      theme: 'dark',
+      custom({ dataPointIndex }) {
+        const h = history[dataPointIndex]
+        if (!h) return ''
+        const stats = ['vit','str','end','nut','dis'].map(k => {
+          const s = h.stats[k]
+          const score = s && s.score != null ? Math.round(s.score) : '—'
+          const xp = s && s.score != null ? (s.score / 5).toFixed(1) : '—'
+          return `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#94a3b8">${STAT_NAMES[k]}</span><span>${score}</span><span style="color:#64748b">+${xp}</span></div>`
+        }).join('')
+        const netColor = h.net_xp >= 0 ? '#22c55e' : '#ef4444'
+        return `<div style="padding:10px 14px;font-size:10px;min-width:140px">`
+          + `<div style="font-weight:600;margin-bottom:6px;color:#e2e8f0">${h.day}</div>`
+          + stats
+          + `<div style="border-top:1px solid #334155;margin-top:6px;padding-top:6px;display:flex;justify-content:space-between">`
+          + `<span style="color:#64748b">Net</span><span style="color:${netColor};font-weight:600">${h.net_xp >= 0 ? '+' : ''}${h.net_xp}</span>`
+          + `</div></div>`
+      }
+    }
+  })
+  historyChart.render()
+}
+
+function toggleSpark(chartId, statKey, compKey) {
+  const el = document.getElementById(chartId)
+  if (!el) return
+
+  // Toggle visibility
+  if (el.style.display !== 'none') {
+    el.style.display = 'none'
+    if (sparkCharts[chartId]) { sparkCharts[chartId].destroy(); delete sparkCharts[chartId] }
+    return
+  }
+  el.style.display = ''
+
+  // Build data from history
+  const data = HISTORY.map(h => {
+    const s = h.stats[statKey]
+    const val = s && s.components ? s.components[compKey] : null
+    return { x: h.day.slice(5), y: val != null ? Math.round(val) : null }
+  }).filter(d => d.y != null)
+
+  if (data.length === 0) {
+    el.innerHTML = '<div style="color:#475569;font-size:.45rem;padding:8px">No data</div>'
+    return
+  }
+
+  if (sparkCharts[chartId]) sparkCharts[chartId].destroy()
+  sparkCharts[chartId] = new ApexCharts(el, {
+    chart: {
+      type: 'line', height: 75, background: 'transparent',
+      toolbar: { show: false }, fontFamily: 'Orbitron,sans-serif',
+      animations: { enabled: false }
+    },
+    theme: { mode: 'dark' },
+    series: [{ name: COMP_NAMES[compKey] || compKey, data }],
+    colors: ['#22d3ee'],
+    stroke: { width: 2, curve: 'smooth' },
+    markers: { size: 3, colors: ['#22d3ee'], strokeWidth: 0 },
+    dataLabels: { enabled: true, style: { fontSize: '8px', colors: ['#94a3b8'] }, offsetY: -6,
+      formatter: v => v != null ? v : '',
+      background: { enabled: true, borderRadius: 0, opacity: 0, borderWidth: 1, borderColor: '#334155' } },
+    xaxis: {
+      type: 'category',
+      labels: { style: { colors: '#475569', fontSize: '7px' } },
+      axisBorder: { show: false }, axisTicks: { show: false }
+    },
+    yaxis: { show: false, min: 0, max: 100 },
+    grid: { show: false, padding: { left: 12, right: 4, top: -15, bottom: 0 } },
+    tooltip: { enabled: false }
+  })
+  sparkCharts[chartId].render()
+}
+
+fetch('/api/leveling').then(r => r.json()).then(render)
+</script>
+</body>
+</html>

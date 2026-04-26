@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Health</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='base.css') }}">
+<script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.2/dist/apexcharts.min.js"></script>
+<style>
+  body{padding:12px 0}
+  header{margin-bottom:12px;padding:0 14px}
+  .panel{border-top:1px solid #1e1e28;border-bottom:1px solid #1e1e28;padding:14px 10px 4px}
+  #ftip{position:fixed;z-index:9999;pointer-events:none;display:none;background:#1e1e2e;border:1px solid #2d2d3a;border-radius:0;box-shadow:0 8px 24px rgba(0,0,0,.5);max-height:85vh;overflow-y:auto}
+  .plbl{padding:0 6px;margin-bottom:2px}
+  .toggle-btn{background:#1e1e28;border:1px solid #334155;color:#94a3b8;padding:3px 10px;border-radius:0;font-size:.65rem;cursor:pointer;font-family:inherit;text-transform:uppercase;letter-spacing:.05em;transition:all .15s}
+  .toggle-btn:hover,.toggle-btn.on{color:#e2e8f0;border-color:#475569;background:#334155}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>{{ name }}</h1>
+  <div style="display:flex;gap:12px;align-items:center">
+  <div class="btns">
+    <button id="b7"  onclick="load(7)">7D</button>
+    <button id="b14" onclick="load(14)">14D</button>
+    <button id="b30" onclick="load(30)" class="on">30D</button>
+  </div>
+  <div class="nav">
+    <a href="/status">Level</a>
+    <a href="/" class="on">Dashboard</a>
+    <a href="/correlations">Correlations</a>
+  </div>
+  </div>
+</header>
+
+<div id="ftip"></div>
+
+<div class="panel"><div class="plbl">Heart Rate</div><div class="scroll-wrap" id="scroll-hr"><div id="ch-hr"></div></div></div>
+<div class="panel"><div class="plbl">Sleep Architecture</div><div class="scroll-wrap" id="scroll-hyp"><div id="ch-hyp"></div></div><div id="hyp-legend" style="display:flex;justify-content:center;gap:14px;padding:6px 0 2px;font-size:12px"></div></div>
+<div class="panel"><div class="plbl">Sleep HRV</div><div class="scroll-wrap" id="scroll-hrv"><div id="ch-hrv"></div></div></div>
+<div class="panel"><div class="plbl" style="display:flex;justify-content:space-between;align-items:center">Macros vs Targets<button class="toggle-btn" id="macro-toggle" onclick="toggleNutView('macro')">Summary</button></div><div id="ch-macro"></div></div>
+<div class="panel"><div class="plbl" style="display:flex;justify-content:space-between;align-items:center">Micronutrients vs Targets<button class="toggle-btn" id="micro-toggle" onclick="toggleNutView('micro')">Summary</button></div><div id="ch-micro"></div></div>
+<div class="panel"><div class="plbl">Daily Scores</div><div id="ch-scores"></div></div>
+<div class="panel"><div class="plbl">Bedtime vs Recovery</div><div id="ch-bedtime"></div></div>
+
+<script>
+const $ = id => document.getElementById(id)
+const charts = {}
+const TARGETS = { cal:2300, prot:120, carbs:250, fat:80, satfat:22, sugar:30,
+  fiber:30, omega3:2, vitD:15, b12:2.4, mag:420, zinc:11, iron:8, potassium:3400, sodium:2300,
+  vitC:90, vitE:15, vitB6:1.3, folate:400 }
+
+const BASE = {
+  chart:  { background:'transparent', toolbar:{show:false}, animations:{enabled:false}, fontFamily:'Orbitron,sans-serif' },
+  theme:  { mode:'dark' },
+  grid:   { borderColor:'#1a1a24', strokeDashArray:4, padding:{right:20} },
+  xaxis:  { type:'datetime', labels:{style:{colors:'#475569',fontSize:'11px'},datetimeUTC:false} },
+  tooltip:{ theme:'dark' },
+}
+const LEGEND = {
+  show:true, position:'bottom', horizontalAlign:'center',
+  labels:{colors:'#94a3b8'}, fontSize:'11px', fontFamily:'Orbitron,sans-serif',
+  itemMargin:{horizontal:10, vertical:4},
+  markers:{size:5, shape:'circle', strokeWidth:0, offsetX:-2},
+  onItemClick:{toggleDataSeries:true},
+  onItemHover:{highlightDataSeries:true},
+}
+
+// Shared x-axis config for timeline charts
+const XAXIS = {
+  type:'datetime',
+  labels:{ show:false },
+  axisTicks:{ show:false }
+}
+
+function draw(id, opts) {
+  if (charts[id]) charts[id].destroy()
+  charts[id] = new ApexCharts($(id), opts)
+  charts[id].render()
+}
+
+function timeAnnotations(boundaries, days) {
+  const step = 1  // hourly labels — chart is wide enough at any range
+  const annos = []
+  for (let i = 0; i < boundaries.length; i++) {
+    const t0 = boundaries[i].t
+    // midnight annotation
+    annos.push({
+      x: t0, borderColor:'#2d2d3a', strokeDashArray:0, borderWidth:1,
+      label:{ text:boundaries[i].label, borderColor:'transparent', position:'top', orientation:'horizontal',
+              style:{ color:'#64748b', background:'transparent', fontSize:'10px', fontWeight:600,
+                      padding:{top:2,bottom:2,left:4,right:4} } }
+    })
+    // hourly annotations within this day
+    for (let h = step; h < 24; h += step) {
+      annos.push({
+        x: t0 + h * 3600000, borderColor:'#1a1a24', strokeDashArray:4, borderWidth:1,
+        label:{ text: String(h).padStart(2,'0') + ':00', borderColor:'transparent', position:'top', orientation:'horizontal',
+                style:{ color:'#334155', background:'transparent', fontSize:'9px',
+                        padding:{top:2,bottom:2,left:4,right:4} } }
+      })
+    }
+  }
+  return annos
+}
+
+
+const MICRO_KEYS = ['cal','prot','carbs','fat','satfat','sugar','fiber','omega3','vitD','b12','mag','zinc','iron','potassium','sodium','vitC','vitE','vitB6','folate']
+const MEAL_MAP = {cal:'calories',prot:'protein_g',carbs:'carbs_g',fat:'fat_g',satfat:'sat_fat_g',sugar:'sugar_g',
+  fiber:'fiber_g',omega3:'omega3_g',vitD:'vitamin_d_mcg',b12:'b12_mcg',mag:'magnesium_mg',zinc:'zinc_mg',
+  iron:'iron_mg',potassium:'potassium_mg',sodium:'sodium_mg',vitC:'vitamin_c_mg',vitE:'vitamin_e_mg',
+  vitB6:'vitamin_b6_mg',folate:'folate_mcg'}
+
+let currentDays = 30  // track for width calc
+
+function chartWidth() {
+  // 24h fills roughly the viewport width (minus body padding)
+  // Use actual ms range to handle DST days (23h or 25h)
+  const vpW = window.innerWidth - 84
+  const rangeMs = currentViewMax - currentViewMin
+  const rangeDays = rangeMs / 86400000  // fractional days (DST-aware)
+  return Math.max(vpW, Math.round(rangeDays * vpW))
+}
+
+function scrollToEnd(wrapperId) {
+  const el = $(wrapperId)
+  if (el) el.scrollLeft = el.scrollWidth
+}
+
+// Sync scroll between HR and Sleep charts
+let scrollSource = null
+function initSyncScroll() {
+  const panels = ['scroll-hr', 'scroll-hyp', 'scroll-hrv'].map(id => $(id)).filter(Boolean)
+  if (panels.length < 2) return
+  function sync(src, targets) {
+    src.addEventListener('scroll', () => {
+      if (scrollSource && scrollSource !== src) return
+      scrollSource = src
+      const maxScroll = src.scrollWidth - src.clientWidth
+      const ratio = maxScroll > 0 ? src.scrollLeft / maxScroll : 0
+      targets.forEach(tgt => { tgt.scrollLeft = ratio * (tgt.scrollWidth - tgt.clientWidth) })
+      requestAnimationFrame(() => { scrollSource = null })
+    })
+  }
+  panels.forEach(p => sync(p, panels.filter(o => o !== p)))
+}
+initSyncScroll()
+
+let currentViewMin = 0
+let currentViewMax = 0
+
+function hrChart(data, viewMin, viewMax) {
+  const byDay = {}
+  data.meals.forEach(m => {
+    const d = m.logged_at.substr(0,10)
+    if (!byDay[d]) { byDay[d] = {}; MICRO_KEYS.forEach(k => byDay[d][k] = 0) }
+    MICRO_KEYS.forEach(k => byDay[d][k] += Math.round((m[MEAL_MAP[k]] || 0) * 10) / 10)
+  })
+
+  const SUBSTANCE_COLOR = { weed:'#a78bfa', caffeine:'#c084fc', nicotine:'#8b5cf6', alcohol:'#7c3aed' }
+
+  const annotations = [
+    ...timeAnnotations(data.boundaries, currentDays),
+    ...data.workouts.map(w => ({
+      x: new Date(w.start).getTime(), x2: new Date(w.end).getTime(),
+      fillColor:'#fbbf24', opacity:.1,
+      label:{ text:w.activity, borderColor:'transparent',
+              style:{color:'#fbbf24',background:'transparent',fontSize:'10px'} }
+    })),
+    ...data.meals.map(m => ({
+      x: new Date(m.logged_at).getTime(), borderColor:'#22c55e40', strokeDashArray:4,
+      label:{ text:m.meal_type, borderColor:'transparent',
+              style:{color:'#22c55e',background:'transparent',fontSize:'10px'} }
+    })),
+    ...(data.substances||[]).map(s => ({
+      x: new Date(s.logged_at).getTime(), borderColor:(SUBSTANCE_COLOR[s.substance]||'#4ade80')+'60', strokeDashArray:3,
+      label:{ text:s.substance, borderColor:'transparent',
+              style:{color:SUBSTANCE_COLOR[s.substance]||'#4ade80',background:'transparent',fontSize:'10px'} }
+    })),
+    ...(data.sex||[]).map(s => ({
+      x: new Date(s.logged_at).getTime(), borderColor:'#ec489960', strokeDashArray:3,
+      label:{ text:s.type, borderColor:'transparent',
+              style:{color:'#ec4899',background:'transparent',fontSize:'10px'} }
+    })),
+  ]
+
+  // Build meal tooltip HTML for the floating tip
+  function mealTip(idx) {
+    const m = data.meals[idx]
+    if (!m) return ''
+    const day = m.logged_at.substr(0,10)
+    const dt  = byDay[day] || {}
+    const time = new Date(m.logged_at).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})
+    const r1 = v => v != null ? (v < 10 ? v.toFixed(1) : Math.round(v)) : 0
+    const pct = (v, t) => Math.round((v || 0) / t * 100)
+    const row = (label, mKey, tKey, unit) => {
+      const val = m[MEAL_MAP[mKey]], dv = dt[mKey], tgt = TARGETS[tKey]
+      const p = pct(val,tgt), dp = pct(dv,tgt)
+      const clr = p >= 80 ? '#4ade80' : p >= 40 ? '#fbbf24' : '#f87171'
+      return `<div style="display:flex;justify-content:space-between;gap:8px;padding:0">
+        <span style="color:#94a3b8;min-width:60px">${label}</span>
+        <span style="white-space:nowrap">
+          <b>${r1(val)}</b><span style="color:#475569">/${tgt}${unit}</span>
+          <span style="color:${clr};font-size:9px;font-weight:600;min-width:28px;display:inline-block;text-align:right">${p}%</span>
+          <span style="color:#334155;margin:0 2px">|</span>
+          <span style="color:#64748b;font-size:9px">day ${r1(dv)}/${tgt} <b>${dp}%</b></span>
+        </span>
+      </div>`
+    }
+    const sec = (title, rows) =>
+      `<div style="border-top:1px solid #1e293b;margin-top:5px;padding-top:4px">
+        <div style="color:#e2e8f0;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px">${title}</div>
+        ${rows}
+      </div>`
+    return `<div style="padding:10px 14px;font-size:11px;line-height:1.6;width:360px">
+      <div style="color:#22c55e;font-weight:600;font-size:11px;margin-bottom:2px">${m.meal_type} · ${time}</div>
+      <div style="color:#64748b;font-size:10px;margin-bottom:3px;word-wrap:break-word;overflow-wrap:break-word">${m.description}</div>
+      ${sec('Macros',
+        row('Calories','cal','cal',' kcal') +
+        row('Protein','prot','prot','g') +
+        row('Carbs','carbs','carbs','g') +
+        row('Fat','fat','fat','g') +
+        row('Sat Fat','satfat','satfat','g') +
+        row('Sugar','sugar','sugar','g') +
+        row('Fiber','fiber','fiber','g')
+      )}
+      ${sec('Minerals',
+        row('Omega-3','omega3','omega3','g') +
+        row('Iron','iron','iron','mg') +
+        row('Magnesium','mag','mag','mg') +
+        row('Zinc','zinc','zinc','mg') +
+        row('Potassium','potassium','potassium','mg') +
+        row('Sodium','sodium','sodium','mg')
+      )}
+      ${sec('Vitamins',
+        row('Vit D','vitD','vitD','mcg') +
+        row('B12','b12','b12','mcg') +
+        row('Vit C','vitC','vitC','mg') +
+        row('Vit B6','vitB6','vitB6','mg') +
+        row('Folate','folate','folate','mcg')
+      )}
+    </div>`
+  }
+
+
+  // Set chart width so 24h ≈ viewport width
+  const w = chartWidth()
+  $('ch-hr').style.width = w + 'px'
+  $('ch-hr').style.minWidth = w + 'px'
+
+  const hrData = data.hr.map(r => [new Date(r.t).getTime(), r.bpm])
+
+  // Meal dots as point annotations pinned to y=45 (just above yaxis min)
+  const mealPoints = data.meals.map((m, i) => ({
+    x: new Date(m.logged_at).getTime(), y: 45,
+    marker:{ size:7, fillColor:'#22c55e', strokeWidth:0, shape:'circle', cssClass:'meal-dot' },
+    label:{ text:'', borderWidth:0 },
+    mouseEnter: undefined  // handled via DOM below
+  }))
+
+  draw('ch-hr', { ...BASE,
+    chart: { ...BASE.chart, type:'area', height:280, width:w, zoom:{enabled:false}, toolbar:{show:false},
+             events:{ mounted() { scrollToEnd('scroll-hr') } }},
+    series: [{ name:'Heart Rate', color:'#f87171', data: hrData }],
+    stroke:     { width:2.5, curve:'monotoneCubic' },
+    fill:       { type:'gradient', gradient:{opacityFrom:.3,opacityTo:.03} },
+    dataLabels: { enabled:false },
+    markers:    { size:0, hover:{size:0} },
+    connectNulls: true,
+    legend:     { show:false },
+    annotations:{ xaxis: annotations, points: mealPoints },
+    xaxis: { ...XAXIS, min:currentViewMin, max:currentViewMax, tooltip:{enabled:false}, crosshairs:{show:true, stroke:{color:'#475569', dashArray:2}} },
+    yaxis: { show:false, min:40, max:150 },
+    tooltip:{ theme:'dark', enabled:true, shared:false, intersect:false,
+      custom({dataPointIndex, w}) {
+        const val = w.globals.series[0][dataPointIndex]
+        if (val == null) return ''
+        const ts = w.globals.seriesX[0][dataPointIndex]
+        const t = new Date(ts).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})
+        return `<div style="padding:6px 10px;font-size:12px">${t}<br><b>${val} bpm</b></div>`
+      }
+    },
+  })
+
+  // Attach hover events to meal dot annotation markers via DOM
+  const ftip = $('ftip')
+  const chartEl = $('ch-hr')
+  // ApexCharts renders point annotations as circles inside .apexcharts-point-annotations
+  requestAnimationFrame(() => {
+    const dots = chartEl.querySelectorAll('.apexcharts-point-annotations circle')
+    dots.forEach((dot, i) => {
+      dot.style.cursor = 'pointer'
+      dot.addEventListener('mouseenter', (e) => {
+        ftip.innerHTML = mealTip(i)
+        ftip.style.display = 'block'
+        ftip.style.pointerEvents = 'auto'
+        requestAnimationFrame(() => {
+          const r = ftip.getBoundingClientRect()
+          const dotRect = dot.getBoundingClientRect()
+          let left = dotRect.left + dotRect.width/2 - r.width/2
+          left = Math.max(8, Math.min(left, window.innerWidth - r.width - 8))
+          ftip.style.left = left + 'px'
+          ftip.style.top = '8px'
+        })
+      })
+      dot.addEventListener('mouseleave', () => {
+        setTimeout(() => {
+          if (!ftip.matches(':hover')) {
+            ftip.style.display = 'none'
+            ftip.style.pointerEvents = 'none'
+          }
+        }, 200)
+      })
+    })
+  })
+  ftip.addEventListener('mouseleave', () => {
+    ftip.style.display = 'none'
+    ftip.style.pointerEvents = 'none'
+  })
+}
+
+function sleepChart(data, viewMin, viewMax) {
+  const COLOR  = { Deep:'#7c3aed', REM:'#22c55e', Light:'#38bdf8', Awake:'#e11d48' }
+  const stages = ['Deep','REM','Light','Awake']
+  const series = stages.map(s => ({
+    name: s, color: COLOR[s],
+    data: data.runs.filter(r=>r.stage===s).map(r=>({ x:'Sleep', y:[r.start, r.end] }))
+  }))
+  const dur = ms => { const h=Math.floor(ms/3600000),m=Math.round((ms%3600000)/60000); return h?`${h}h ${m}m`:`${m}m` }
+
+  // Group runs into nights (gap > 4h = new night), compute per-night stage totals
+  const nights = []
+  let cur = []
+  data.runs.forEach(r => {
+    if (cur.length && r.start - cur[cur.length-1].end > 4*3600000) { nights.push(cur); cur = [] }
+    cur.push(r)
+  })
+  if (cur.length) nights.push(cur)
+
+  const runMeta = new Map()
+  nights.forEach(night => {
+    const totalMs = night.reduce((s,r) => s + (r.end - r.start), 0)
+    const byStage = {}
+    night.forEach(r => { byStage[r.stage] = (byStage[r.stage] || 0) + (r.end - r.start) })
+    // Wake-up day in local time = day Oura assigns the sleep score to
+    const wakeDay = new Date(night[night.length-1].end).toLocaleDateString('en-CA')
+    const score = data.sleep_scores ? data.sleep_scores[wakeDay] : null
+    night.forEach(r => runMeta.set(r, { totalMs, byStage, score }))
+  })
+
+  const sw = chartWidth()
+  $('ch-hyp').style.width = sw + 'px'
+  $('ch-hyp').style.minWidth = sw + 'px'
+
+  // Interactive legend outside scroll container — uses ApexCharts toggleSeries API
+  const legEl = $('hyp-legend')
+  legEl.innerHTML = stages.map(s =>
+    `<span class="hyp-leg-item" data-series="${s}" style="cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:4px;padding:0 5px;transition:opacity .15s">
+      <span style="width:10px;height:10px;border-radius:50%;background:${COLOR[s]};display:inline-block;flex-shrink:0"></span>
+      <span style="color:#94a3b8;font-size:11px;font-family:Orbitron,sans-serif">${s}</span>
+    </span>`
+  ).join('')
+
+  draw('ch-hyp', { ...BASE,
+    chart: { ...BASE.chart, type:'rangeBar', height:160, width:sw, zoom:{enabled:false}, toolbar:{show:false},
+             events:{ mounted() {
+               scrollToEnd('scroll-hyp')
+               legEl.querySelectorAll('.hyp-leg-item').forEach(el => {
+                 el.addEventListener('click', () => {
+                   charts['ch-hyp'].toggleSeries(el.dataset.series)
+                   el.style.opacity = el.style.opacity === '0.3' ? '1' : '0.3'
+                 })
+                 el.addEventListener('mouseenter', () => {
+                   const idx = stages.indexOf(el.dataset.series)
+                   const seriesEls = $('ch-hyp').querySelectorAll('.apexcharts-series')
+                   seriesEls.forEach((se, i) => { se.style.opacity = i === idx ? '1' : '0.15' })
+                   legEl.querySelectorAll('.hyp-leg-item').forEach(other => {
+                     if (other.style.opacity !== '0.3') other.style.opacity = other === el ? '1' : '0.5'
+                   })
+                 })
+                 el.addEventListener('mouseleave', () => {
+                   $('ch-hyp').querySelectorAll('.apexcharts-series').forEach(se => { se.style.opacity = '1' })
+                   legEl.querySelectorAll('.hyp-leg-item').forEach(other => {
+                     if (other.style.opacity !== '0.3') other.style.opacity = '1'
+                   })
+                 })
+               })
+             } } },
+    series,
+    plotOptions: { bar:{ horizontal:true, rangeBarGroupRows:true, barHeight:'80%' } },
+    annotations: { xaxis: timeAnnotations(data.boundaries, currentDays) },
+    xaxis: { ...XAXIS, min:currentViewMin, max:currentViewMax },
+    yaxis: { show:false },
+    legend:{ show:false },
+    tooltip:{ theme:'dark',
+      custom({seriesIndex, dataPointIndex}) {
+        const s = stages[seriesIndex]
+        const r = data.runs.filter(r=>r.stage===s)[dataPointIndex]
+        if (!r) return ''
+        const fmt = ms => new Date(ms).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})
+        const meta = runMeta.get(r)
+        const thisPct = meta ? Math.round((r.end - r.start) / meta.totalMs * 100) : null
+        const DOT = { Deep:'#7c3aed', REM:'#22c55e', Light:'#38bdf8', Awake:'#e11d48' }
+        const breakdown = meta ? stages.map(st => {
+          const ms = meta.byStage[st] || 0
+          const pct = Math.round(ms / meta.totalMs * 100)
+          const bold = st === s ? 'font-weight:600' : 'opacity:.7'
+          return `<div style="display:flex;justify-content:space-between;gap:20px;${bold}">
+            <span><span style="color:${DOT[st]}">●</span> ${st}</span>
+            <span>${dur(ms)} · ${pct}%</span>
+          </div>`
+        }).join('') : ''
+        const scoreStr = meta && meta.score != null ? `<span style="color:#94a3b8;margin-left:8px">Sleep score: <b style="color:#e2e8f0">${meta.score}</b></span>` : ''
+        const totalStr = meta ? `<span style="color:#e2e8f0;font-weight:600">${dur(meta.totalMs)}</span> total` : ''
+        return `<div style="padding:10px 14px;font-size:12px;line-height:1.8;min-width:200px">
+          <div style="color:${DOT[s]};font-weight:600;margin-bottom:2px">${s} · ${fmt(r.start)} – ${fmt(r.end)} · ${dur(r.end-r.start)}${thisPct!=null?' · '+thisPct+'%':''}</div>
+          <div style="margin-bottom:6px;font-size:11px">${totalStr}${scoreStr}</div>
+          ${breakdown}
+        </div>`
+      }
+    },
+  })
+}
+
+function hrvChart(data, viewMin, viewMax) {
+  const raw = (data.hrv_series||[])
+  if (!raw.length) return
+
+  // Split into nights (gap > 2h = new night) and insert null breaks
+  const GAP = 2 * 3600 * 1000
+  const pts = []
+  const nights = []  // [{start, end, sum, count}]
+  let cur = { sum: 0, count: 0, start: raw[0].t }
+  for (let i = 0; i < raw.length; i++) {
+    if (i > 0 && raw[i].t - raw[i-1].t > GAP) {
+      cur.end = raw[i-1].t
+      nights.push(cur)
+      pts.push([raw[i-1].t + 1, null])  // null break between nights
+      cur = { sum: 0, count: 0, start: raw[i].t }
+    }
+    pts.push([raw[i].t, raw[i].hrv])
+    cur.sum += raw[i].hrv
+    cur.count++
+  }
+  cur.end = raw[raw.length-1].t
+  nights.push(cur)
+
+  // Lookup nightly avg for a given timestamp
+  const nightAvg = ts => {
+    const n = nights.find(n => ts >= n.start && ts <= n.end)
+    return n ? Math.round(n.sum / n.count) : null
+  }
+
+  const w = chartWidth()
+  $('ch-hrv').style.width = w + 'px'
+  $('ch-hrv').style.minWidth = w + 'px'
+
+  draw('ch-hrv', { ...BASE,
+    chart: { ...BASE.chart, type:'area', height:160, width:w, zoom:{enabled:false}, toolbar:{show:false},
+             events:{ mounted() { scrollToEnd('scroll-hrv') } }},
+    series: [{ name:'HRV', color:'#a78bfa', data: pts }],
+    stroke:     { width:1.5, curve:'straight' },
+    fill:       { type:'gradient', gradient:{opacityFrom:.25,opacityTo:.03} },
+    dataLabels: { enabled:false },
+    markers:    { size:0, hover:{size:0} },
+    legend:     { show:false },
+    annotations:{ xaxis: timeAnnotations(data.boundaries, currentDays) },
+    xaxis: { ...XAXIS, min:currentViewMin, max:currentViewMax, tooltip:{enabled:false} },
+    yaxis: { show:true, min:0, max:120, tickAmount:3,
+             labels:{style:{colors:'#475569',fontSize:'10px'}, formatter:v=>v+'ms'} },
+    tooltip:{ theme:'dark', enabled:true, shared:false, intersect:false,
+      custom({dataPointIndex, w:ww}) {
+        const val = ww.globals.series[0][dataPointIndex]
+        if (val == null) return ''
+        const ts = ww.globals.seriesX[0][dataPointIndex]
+        const t = new Date(ts).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})
+        const avg = nightAvg(ts)
+        const clr = val >= 70 ? '#4ade80' : val >= 40 ? '#fbbf24' : '#f87171'
+        const avgClr = avg >= 70 ? '#4ade80' : avg >= 40 ? '#fbbf24' : '#f87171'
+        return `<div style="padding:6px 10px;font-size:12px">${t}<br><b style="color:${clr}">${val} ms</b>`
+          + (avg != null ? `<br><span style="color:#94a3b8">Night avg:</span> <b style="color:${avgClr}">${avg} ms</b>` : '')
+          + `</div>`
+      }
+    },
+  })
+}
+
+function nutAgg(data) {
+  const dayMap = {}
+  data.meals.forEach(m => {
+    const d = m.logged_at.substr(0, 10)
+    if (!dayMap[d]) { dayMap[d] = {}; MICRO_KEYS.forEach(k => dayMap[d][k] = 0) }
+    MICRO_KEYS.forEach(k => dayMap[d][k] += (m[MEAL_MAP[k]] || 0))
+  })
+  return dayMap
+}
+
+// Store chart state for toggle
+const nutState = { macro: {}, micro: {} }
+
+function nutBarChart(id, dayMap, defs, height) {
+  const type = id === 'ch-macro' ? 'macro' : 'micro'
+  nutState[type] = { dayMap, defs, height }
+
+  const days = Object.keys(dayMap).sort()
+  if (!days.length) return
+  const p = (v, t) => Math.min(Math.round(v / t * 100), 200)
+  const labels = days.map(d => {
+    const dt = new Date(d + 'T12:00:00')
+    return dt.toLocaleDateString('en-US', {month:'short', day:'numeric'})
+  })
+  const series = defs.map(m => ({
+    name: m.label, color: m.color,
+    data: days.map(d => p(dayMap[d][m.key], m.target))
+  }))
+  draw(id, { ...BASE,
+    chart: { ...BASE.chart, type:'bar', height, toolbar:{show:false} },
+    series,
+    plotOptions: { bar:{ columnWidth:'70%', borderRadius:3 } },
+    dataLabels: { enabled:false },
+    stroke:     { show:false },
+    xaxis: { categories: labels, labels:{style:{colors:'#475569',fontSize:'11px'}} },
+    yaxis: { min:0, max:200, tickAmount:4,
+             labels:{style:{colors:'#475569',fontSize:'11px'}, formatter:v=>v+'%'} },
+    annotations: { yaxis:[{ y:100, borderColor:'#334155', strokeDashArray:4,
+                             label:{text:'target', borderColor:'transparent',
+                                    style:{color:'#475569',background:'transparent',fontSize:'10px'}} }] },
+    legend: LEGEND,
+    tooltip: {
+      theme:'dark',
+      y: { formatter: (val, {seriesIndex, dataPointIndex}) => {
+        const m = defs[seriesIndex]
+        const raw = dayMap[days[dataPointIndex]][m.key]
+        return `${raw < 10 ? raw.toFixed(1) : Math.round(raw)}${m.unit} (${val}%)`
+      }}
+    },
+  })
+}
+
+function nutSummaryChart(id, dayMap, defs, height) {
+  const days = Object.keys(dayMap).sort()
+  if (!days.length) return
+  const nDays = days.length
+  const fmt = v => v < 10 ? v.toFixed(1) : Math.round(v)
+
+  // Sum totals across all days
+  const totals = {}
+  defs.forEach(m => { totals[m.key] = 0 })
+  days.forEach(d => defs.forEach(m => { totals[m.key] += (dayMap[d][m.key] || 0) }))
+
+  // Each nutrient as % of period target, same as daily view
+  const p = (v, t) => Math.min(Math.round(v / t * 100), 200)
+  const series = defs.map(m => ({
+    name: m.label, color: m.color,
+    data: [p(totals[m.key], m.target * nDays)]
+  }))
+
+  draw(id, { ...BASE,
+    chart: { ...BASE.chart, type:'bar', height, toolbar:{show:false} },
+    series,
+    plotOptions: { bar:{ columnWidth:'50%', borderRadius:3 } },
+    dataLabels: { enabled:false },
+    stroke: { show:false },
+    xaxis: { categories: [nDays + '-Day Total'], labels:{style:{colors:'#94a3b8',fontSize:'11px'}} },
+    yaxis: { min:0, max:200, tickAmount:4,
+             labels:{style:{colors:'#475569',fontSize:'11px'}, formatter:v=>v+'%'} },
+    annotations: { yaxis:[{ y:100, borderColor:'#334155', strokeDashArray:4,
+                             label:{text:'target', borderColor:'transparent',
+                                    style:{color:'#475569',background:'transparent',fontSize:'10px'}} }] },
+    legend: LEGEND,
+    tooltip: {
+      theme:'dark',
+      y: { formatter: (val, {seriesIndex}) => {
+        const m = defs[seriesIndex]
+        const actual = totals[m.key]
+        const target = m.target * nDays
+        return `${fmt(actual)}/${fmt(target)}${m.unit} (${val}%)`
+      }}
+    },
+  })
+}
+
+const nutViewMode = { macro: 'daily', micro: 'daily' }
+
+function toggleNutView(type) {
+  const id = 'ch-' + type
+  const btn = $(type + '-toggle')
+  const st = nutState[type]
+  if (!st.dayMap) return
+
+  if (nutViewMode[type] === 'daily') {
+    nutViewMode[type] = 'summary'
+    btn.textContent = 'Daily'
+    btn.classList.add('on')
+    nutSummaryChart(id, st.dayMap, st.defs, st.height)
+  } else {
+    nutViewMode[type] = 'daily'
+    btn.textContent = 'Summary'
+    btn.classList.remove('on')
+    nutBarChart(id, st.dayMap, st.defs, st.height)
+  }
+}
+
+function macroChart(data) {
+  const dayMap = nutAgg(data)
+  nutBarChart('ch-macro', dayMap, [
+    { key:'prot',   label:'Protein',  target:TARGETS.prot,   color:'#ef4444', unit:'g' },
+    { key:'carbs',  label:'Carbs',    target:TARGETS.carbs,  color:'#eab308', unit:'g' },
+    { key:'fat',    label:'Fat',      target:TARGETS.fat,    color:'#fbbf24', unit:'g' },
+    { key:'fiber',  label:'Fiber',    target:TARGETS.fiber,  color:'#22c55e', unit:'g' },
+    { key:'satfat', label:'Sat Fat',  target:TARGETS.satfat, color:'#b91c1c', unit:'g' },
+    { key:'sugar',  label:'Sugar',    target:TARGETS.sugar,  color:'#e2e8f0', unit:'g' },
+    { key:'cal',    label:'Calories', target:TARGETS.cal,    color:'#f97316', unit:' kcal' },
+  ], 220)
+}
+
+function microChart(data) {
+  const dayMap = nutAgg(data)
+  nutBarChart('ch-micro', dayMap, [
+    { key:'omega3',    label:'Omega-3',  target:TARGETS.omega3,    color:'#fcd34d', unit:'g' },
+    { key:'iron',      label:'Iron',     target:TARGETS.iron,      color:'#dc2626', unit:'mg' },
+    { key:'mag',       label:'Magnesium',target:TARGETS.mag,       color:'#cbd5e1', unit:'mg' },
+    { key:'zinc',      label:'Zinc',     target:TARGETS.zinc,      color:'#7dd3fc', unit:'mg' },
+    { key:'potassium', label:'Potassium',target:TARGETS.potassium, color:'#facc15', unit:'mg' },
+    { key:'sodium',    label:'Sodium',   target:TARGETS.sodium,    color:'#94a3b8', unit:'mg' },
+    { key:'vitD',      label:'Vit D',    target:TARGETS.vitD,      color:'#fde047', unit:'mcg' },
+    { key:'b12',       label:'B12',      target:TARGETS.b12,       color:'#f43f5e', unit:'mcg' },
+    { key:'vitC',      label:'Vit C',    target:TARGETS.vitC,      color:'#fb923c', unit:'mg' },
+    { key:'vitB6',     label:'Vit B6',   target:TARGETS.vitB6,     color:'#a78bfa', unit:'mg' },
+    { key:'folate',    label:'Folate',   target:TARGETS.folate,    color:'#4ade80', unit:'mcg' },
+  ], 220)
+}
+
+async function scoresChart(n) {
+  const {scores} = await fetch('/api/scores/'+n).then(r=>r.json())
+  if (!scores.length) return
+
+  const ts = d => new Date(d + 'T12:00:00').getTime()
+  const COL = { sleep:'#3b82f6', readiness:'#eab308', activity:'#ef4444', nutrition:'#16a34a' }
+
+  const series = [
+    { name:'Sleep',      color:COL.sleep,     data:scores.filter(s=>s.sleep!=null).map(s=>[ts(s.day), s.sleep]) },
+    { name:'Readiness',  color:COL.readiness,  data:scores.filter(s=>s.readiness!=null).map(s=>[ts(s.day), s.readiness]) },
+    { name:'Activity',   color:COL.activity,   data:scores.filter(s=>s.activity!=null).map(s=>[ts(s.day), s.activity]) },
+    { name:'Nutrition',  color:COL.nutrition,   data:scores.filter(s=>s.nutrition!=null).map(s=>[ts(s.day), s.nutrition]) },
+  ]
+
+  draw('ch-scores', { ...BASE,
+    chart: { ...BASE.chart, type:'line', height:240, toolbar:{show:false}, zoom:{enabled:false}, selection:{enabled:false} },
+    series,
+    stroke: { width:2.5, curve:'smooth' },
+    markers: { size:4, strokeWidth:0, hover:{size:6} },
+    xaxis: { type:'datetime', labels:{style:{colors:'#475569',fontSize:'11px'}, format:'d MMM'} },
+    yaxis: { min:0, max:100, tickAmount:4,
+             labels:{style:{colors:'#475569',fontSize:'11px'}, formatter:v=>Math.round(v)+''} },
+    annotations: { yaxis:[
+      { y:75, borderColor:'#334155', strokeDashArray:4,
+        label:{ text:'good', borderColor:'transparent',
+                style:{color:'#475569',background:'transparent',fontSize:'10px'} } }
+    ]},
+    legend: LEGEND,
+    tooltip: {
+      theme:'dark', shared:true, intersect:false,
+      x:{ format:'dd MMM yyyy' },
+      y:{ formatter(val) { return Math.round(val) + '/100' } }
+    },
+  })
+}
+
+async function bedtimeChart(n) {
+  const {points} = await fetch('/api/bedtime/'+n).then(r=>r.json())
+  if (!points.length) return
+
+  // Two scatter series: HRV and Readiness, both plotted against bedtime hour
+  const hrvData = points.filter(p => p.hrv != null).map(p => ({ x: p.bed_hour, y: p.hrv, meta: p }))
+  const readyData = points.filter(p => p.readiness != null).map(p => ({ x: p.bed_hour, y: p.readiness, meta: p }))
+  const sleepData = points.filter(p => p.sleep_score != null).map(p => ({ x: p.bed_hour, y: p.sleep_score, meta: p }))
+
+  // Format hour for display: 22.5 -> "10:30 PM", 25.5 -> "1:30 AM"
+  const fmtHour = h => {
+    const hr = h >= 24 ? h - 24 : h
+    const hh = Math.floor(hr), mm = Math.round((hr - hh) * 60)
+    const ampm = hh >= 12 ? 'PM' : 'AM'
+    const h12 = hh === 0 ? 12 : hh > 12 ? hh - 12 : hh
+    return h12 + ':' + String(mm).padStart(2,'0') + ' ' + ampm
+  }
+
+  draw('ch-bedtime', { ...BASE,
+    chart: { ...BASE.chart, type:'scatter', height:260, zoom:{enabled:false}, selection:{enabled:false}, toolbar:{show:false} },
+    series: [
+      { name:'HRV (ms)', color:'#ef4444', data: hrvData },
+      { name:'Readiness', color:'#eab308', data: readyData },
+      { name:'Sleep Score', color:'#a78bfa', data: sleepData },
+    ],
+    markers: { size:8, hover:{sizeOffset:3} },
+    dataLabels: { enabled:false },
+    xaxis: {
+      type:'numeric', tickAmount:8,
+      min: Math.min(...points.map(p=>p.bed_hour)) - 0.5,
+      max: Math.max(...points.map(p=>p.bed_hour)) + 0.5,
+      labels: { style:{colors:'#475569',fontSize:'11px'}, formatter: v => fmtHour(v) },
+      title: { text:'Bedtime', style:{color:'#475569',fontSize:'11px',fontWeight:500} },
+    },
+    yaxis: {
+      min:0, max:100, tickAmount:4,
+      labels: { style:{colors:'#475569',fontSize:'11px'} },
+    },
+    grid: { ...BASE.grid },
+    legend: LEGEND,
+    tooltip: {
+      theme:'dark', shared:false, intersect:true,
+      custom({seriesIndex, dataPointIndex, w}) {
+        const pt = [hrvData, readyData, sleepData][seriesIndex][dataPointIndex]
+        if (!pt) return ''
+        const m = pt.meta
+        const dur = h => { const hh=Math.floor(h), mm=Math.round((h-hh)*60); return hh+'h '+mm+'m' }
+        return `<div style="padding:10px 14px;font-size:11px;line-height:1.7;min-width:200px">
+          <div style="color:#e2e8f0;font-weight:600;margin-bottom:4px">${m.day} · Bed ${m.bed_time}</div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">HRV</span><b style="color:#ef4444">${m.hrv} ms</b></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">Readiness</span><b style="color:#eab308">${m.readiness}/100</b></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">Sleep Score</span><b style="color:#a78bfa">${m.sleep_score}/100</b></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">Duration</span><span>${dur(m.sleep_hrs)}</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">Lowest HR</span><span>${m.lowest_hr} bpm</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">REM</span><span>${m.rem_pct}%</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">Deep</span><span>${m.deep_pct}%</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">Efficiency</span><span>${m.efficiency}%</span></div>
+        </div>`
+      }
+    },
+  })
+}
+
+async function load(n) {
+  currentDays = n
+  ;[7,14,30].forEach(d => $('b'+d).classList.toggle('on', d===n))
+  const [data] = await Promise.all([
+    fetch('/api/continuous/'+n).then(r=>r.json()),
+    scoresChart(n),
+    bedtimeChart(n),
+  ])
+
+  // Use server-computed boundary timestamps (America/Toronto midnight)
+  // so viewMin/viewMax are timezone-consistent with day annotations
+  const bounds = data.boundaries
+  const viewMin = bounds[0].t                        // midnight of first day
+  const viewMax = bounds[bounds.length - 1].t + 86400000  // end of last day (midnight + 24h)
+  currentViewMin = viewMin
+  currentViewMax = viewMax
+
+  hrChart(data, viewMin, viewMax)
+  sleepChart(data, viewMin, viewMax)
+  hrvChart(data, viewMin, viewMax)
+  macroChart(data)
+  microChart(data)
+}
+
+load(30)
+</script>
+</body>
+</html>

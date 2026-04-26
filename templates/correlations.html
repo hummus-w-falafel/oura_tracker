@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Correlations</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='base.css') }}">
+<style>
+  body{padding:12px}
+  header{margin-bottom:12px;padding:0 14px}
+  .panel{border:1px solid #1e1e28;padding:14px}
+  .plbl{margin-bottom:8px}
+  .stats{display:flex;gap:16px;font-size:.75rem;color:#64748b;margin-bottom:10px}
+  .stats b{color:#94a3b8}
+
+  /* Heatmap */
+  .heatmap-wrap{overflow:auto;max-height:80vh}
+  table.heatmap{border-collapse:collapse;font-size:10px}
+  table.heatmap th{padding:4px 6px;color:#64748b;font-weight:500;white-space:nowrap}
+  table.heatmap th.row-label{text-align:right;position:sticky;left:0;background:#131318;z-index:2}
+  table.heatmap th.col-label{writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);vertical-align:bottom;position:sticky;top:0;background:#131318;z-index:1}
+  table.heatmap td{min-width:32px;width:32px;height:28px;text-align:center;cursor:pointer;border:1px solid #0c0c0f;font-size:8px;font-weight:500;transition:outline .1s;font-variant-numeric:tabular-nums}
+  table.heatmap td:hover{outline:2px solid #e2e8f0;outline-offset:-2px;z-index:3}
+  table.heatmap td.dim{opacity:.3;cursor:default}
+
+  /* Scatter overlay */
+  #scatter-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);display:none;z-index:100;justify-content:center;align-items:center}
+  #scatter-overlay.show{display:flex}
+  #scatter-box{background:#131318;border:1px solid #1e1e28;border-radius:0;padding:20px;width:520px;max-width:95vw;position:relative}
+  #scatter-close{position:absolute;top:10px;right:14px;color:#64748b;cursor:pointer;font-size:18px;border:none;background:none}
+  #scatter-close:hover{color:#e2e8f0}
+  #scatter-title{font-size:.8rem;color:#94a3b8;margin-bottom:4px}
+  #scatter-stats{font-size:.7rem;color:#64748b;margin-bottom:10px}
+  #scatter-chart{width:100%;height:300px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>{{ name }}</h1>
+  <div class="nav">
+    <a href="/status">Level</a>
+    <a href="/">Dashboard</a>
+    <a href="/correlations" class="on">Correlations</a>
+  </div>
+</header>
+
+<div class="panel">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <div class="plbl" style="margin-bottom:0">Pairwise Correlation Matrix</div>
+    <div class="btns">
+      <button id="btn-lag0" class="on" onclick="setLag(0)">Same Day</button>
+      <button id="btn-lag1" onclick="setLag(1)">Next Day</button>
+      <span style="width:1px;height:20px;background:#1e1e28;margin:0 4px"></span>
+      <button id="btn-pearson" class="on" onclick="setMode('pearson')">Pearson</button>
+      <button id="btn-mi" onclick="setMode('mi')">Mutual Info</button>
+      <button id="btn-delta" onclick="setMode('delta')">MI - |Pearson|</button>
+    </div>
+  </div>
+  <div class="stats" id="stats-bar"></div>
+  <div class="heatmap-wrap" id="heatmap-wrap"></div>
+</div>
+
+<div id="scatter-overlay" onclick="if(event.target===this)closeScatter()">
+  <div id="scatter-box">
+    <button id="scatter-close" onclick="closeScatter()">&times;</button>
+    <div id="scatter-title"></div>
+    <div id="scatter-stats"></div>
+    <div id="scatter-chart"></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.2/dist/apexcharts.min.js"></script>
+<script>
+const $ = id => document.getElementById(id)
+let DATA = null
+let mode = 'pearson'
+let currentLag = 0
+let scatterChart = null
+
+const DESCRIPTIONS = {
+  sleep_score:'Oura composite sleep quality score (0-100)',
+  readiness_score:'Oura recovery/readiness score (0-100)',
+  activity_score:'Oura daily activity score (0-100)',
+  hrv:'Average heart rate variability during sleep (ms)',
+  lowest_hr:'Lowest heart rate during sleep (bpm)',
+  avg_hr:'Average heart rate during sleep (bpm)',
+  sleep_hours:'Total sleep duration (hours)',
+  efficiency:'% of time in bed actually asleep',
+  latency_min:'Minutes to fall asleep after getting into bed',
+  deep_pct:'Deep sleep as % of total sleep',
+  rem_pct:'REM sleep as % of total sleep',
+  bedtime_hour:'Hour you got into bed (decimal, e.g. 23.5 = 11:30 PM)',
+  temp_deviation:'Body temp deviation from personal baseline (°C)',
+  steps:'Daily step count',
+  active_cal:'Calories burned from activity (excludes BMR)',
+  sedentary_hrs:'Hours spent sedentary during the day',
+  spo2:'Average blood oxygen during sleep (%)',
+  vascular_age:'Oura estimated cardiovascular age (years)',
+  calories:'Total calories consumed from logged meals',
+  protein_g:'Total protein consumed (g)',
+  fat_g:'Total fat consumed (g)',
+  fiber_g:'Total fiber consumed (g)',
+  sugar_g:'Total sugar consumed (g)',
+  sat_fat_g:'Total saturated fat consumed (g)',
+  meal_count:'Number of meals logged that day',
+  last_meal_hour:'Hour of last meal (decimal)',
+  nutrition_score:'Composite nutrition quality score (0-100) based on macro/micro targets',
+  weed_count:'Number of weed sessions logged that day',
+  weed_g:'Total grams of weed consumed that day',
+  thc_mg:'Total THC consumed that day (mg), derived from amount × potency',
+  alcohol_count:'Number of alcohol sessions logged that day',
+  alcohol_ml:'Total volume of alcoholic drinks consumed (ml)',
+  pure_alcohol_ml:'Total pure alcohol consumed (ml), derived from volume × ABV%',
+}
+
+const NICE_NAMES = {
+  sleep_score:'Sleep Score', readiness_score:'Readiness', activity_score:'Activity Score',
+  hrv:'HRV', lowest_hr:'Lowest HR', avg_hr:'Avg HR',
+  sleep_hours:'Sleep Hours', efficiency:'Efficiency', latency_min:'Latency',
+  deep_pct:'Deep %', rem_pct:'REM %',
+  bedtime_hour:'Bedtime', temp_deviation:'Temp Dev',
+  steps:'Steps', active_cal:'Active Cal', sedentary_hrs:'Sedentary Hrs',
+  spo2:'SpO2', vascular_age:'Vascular Age',
+  calories:'Calories', protein_g:'Protein', fat_g:'Fat', fiber_g:'Fiber',
+  sugar_g:'Sugar', sat_fat_g:'Sat Fat',
+  meal_count:'Meals/Day', last_meal_hour:'Last Meal',
+  nutrition_score:'Nutrition Score',
+  weed_count:'Weed Sessions',
+  weed_g:'Weed (g)',
+  thc_mg:'THC (mg)',
+  alcohol_count:'Alcohol Sessions',
+  alcohol_ml:'Alcohol (ml)',
+  pure_alcohol_ml:'Pure Alcohol (ml)',
+}
+
+function colorPearson(v) {
+  if (v == null) return {bg:'#1a1a24', fg:'#334155'}
+  const abs = Math.abs(v)
+  const alpha = Math.min(abs * 1.2, 1)
+  const strong = abs >= 0.75
+  if (v > 0) return {bg:`rgba(34,197,94,${strong ? 1 : alpha * 0.7})`, fg: abs > 0.3 ? '#fff' : '#94a3b8'}
+  return {bg:`rgba(239,68,68,${strong ? 1 : alpha * 0.7})`, fg: abs > 0.3 ? '#fff' : '#94a3b8'}
+}
+
+function colorMI(v) {
+  if (v == null) return {bg:'#1a1a24', fg:'#334155'}
+  const strong = v >= 0.75
+  const alpha = Math.min(v * 1.5, 1)
+  return {bg:`rgba(167,139,250,${strong ? 1 : alpha * 0.7})`, fg: v > 0.3 ? '#fff' : '#94a3b8'}
+}
+
+function colorDelta(p, mi) {
+  if (p == null || mi == null) return {bg:'#1a1a24', fg:'#334155'}
+  const d = mi - Math.abs(p)
+  if (d <= 0) return {bg:'#1a1a24', fg:'#475569'}
+  const strong = d >= 0.75
+  const alpha = Math.min(d * 1.2, 1)
+  return {bg:`rgba(34,197,94,${strong ? 1 : alpha * 0.7})`, fg: d > 0.3 ? '#fff' : '#94a3b8'}
+}
+
+function getVal(i, j) {
+  if (mode === 'pearson') return DATA.pearson[i][j]
+  if (mode === 'mi') return DATA.mi[i][j]
+  if (mode === 'delta') {
+    const p = DATA.pearson[i][j], m = DATA.mi[i][j]
+    if (p == null || m == null) return null
+    return Math.round((m - Math.abs(p)) * 1000) / 1000
+  }
+}
+
+function getColor(i, j) {
+  const v = getVal(i, j)
+  if (mode === 'pearson') return colorPearson(v)
+  if (mode === 'mi') return colorMI(v)
+  return colorDelta(DATA.pearson[i][j], DATA.mi[i][j])
+}
+
+function render() {
+  const f = DATA.features
+  const n = f.length
+  let html = '<table class="heatmap"><thead><tr><th></th>'
+  for (let j = 0; j < n; j++) html += `<th class="col-label" title="${DESCRIPTIONS[f[j]] || ''}">${NICE_NAMES[f[j]] || f[j]}</th>`
+  html += '</tr></thead><tbody>'
+  for (let i = 0; i < n; i++) {
+    html += `<tr><th class="row-label" title="${DESCRIPTIONS[f[i]] || ''}">${NICE_NAMES[f[i]] || f[i]}</th>`
+    for (let j = 0; j < n; j++) {
+      const v = getVal(i, j)
+      const c = getColor(i, j)
+      const cnt = DATA.counts[i][j]
+      const dim = cnt < 14 ? ' dim' : ''
+      const display = v != null ? v.toFixed(2) : ''
+      const key = currentLag === 0 && i > j ? `${j}-${i}` : `${i}-${j}`
+      const p = DATA.pvalues && DATA.pvalues[i] ? DATA.pvalues[i][j] : null
+      const pText = p != null ? `, p=${p}` : ''
+      const strong = v != null && ((mode === 'pearson' && Math.abs(v) >= 0.75) || (mode === 'mi' && v >= 0.75) || (mode === 'delta' && v >= 0.4))
+      const strongStyle = strong ? ';font-weight:700' : ''
+      html += `<td style="background:${c.bg};color:${c.fg}${strongStyle}" class="${dim}" `
+        + `onclick="showScatter('${key}')" title="${NICE_NAMES[f[i]]||f[i]} vs ${NICE_NAMES[f[j]]||f[j]} (n=${cnt}${pText})">`
+        + `${display}</td>`
+    }
+    html += '</tr>'
+  }
+  html += '</tbody></table>'
+  $('heatmap-wrap').innerHTML = html
+
+  // Stats bar
+  const minPts = Math.min(...DATA.counts.flat().filter(c => c > 0))
+  const maxPts = Math.max(...DATA.counts.flat())
+  const lagLabel = currentLag === 0 ? 'same-day' : `day N → day N+${currentLag}`
+  const pairCount = currentLag === 0 ? n*(n-1)/2 : n*n
+  $('stats-bar').innerHTML = `<span><b>${DATA.total_days}</b> days of data</span>`
+    + `<span><b>${n}</b> variables</span>`
+    + `<span><b>${pairCount}</b> pairs</span>`
+    + `<span>lag: <b>${lagLabel}</b></span>`
+    + `<span>n range: <b>${minPts}-${maxPts}</b></span>`
+    + `<span style="color:#475569">greyed = &lt;14 data points</span>`
+}
+
+function setMode(m) {
+  mode = m
+  ;['pearson','mi','delta'].forEach(k => $('btn-'+k).classList.toggle('on', k === m))
+  render()
+}
+
+function setLag(l) {
+  currentLag = l
+  ;[0,1].forEach(v => $('btn-lag'+v).classList.toggle('on', v === l))
+  fetchData(l)
+}
+
+function fetchData(lag) {
+  fetch('/api/correlations?lag='+lag).then(r=>r.json()).then(d => {
+    DATA = d
+    render()
+  })
+}
+
+function showScatter(key) {
+  const d = DATA.scatter[key]
+  if (!d) return
+  const xName = NICE_NAMES[d.x_label] || d.x_label
+  const yName = NICE_NAMES[d.y_label] || d.y_label
+  const lagSuffix = currentLag > 0 ? ` (day N → N+${currentLag})` : ''
+  $('scatter-title').textContent = `${xName} vs ${yName}${lagSuffix}`
+  const rClr = Math.abs(d.r) > 0.5 ? '#22c55e' : Math.abs(d.r) > 0.3 ? '#fbbf24' : '#64748b'
+  $('scatter-stats').innerHTML = `Pearson r = <b style="color:${rClr}">${d.r}</b> · p = ${d.p} · MI = <b style="color:#a78bfa">${d.nmi}</b> · n = ${d.n}`
+
+  const pts = d.x.map((x, i) => ({x, y: d.y[i]}))
+
+  if (scatterChart) scatterChart.destroy()
+  scatterChart = new ApexCharts($('scatter-chart'), {
+    chart:{type:'scatter',height:280,background:'transparent',toolbar:{show:false},fontFamily:'Orbitron,sans-serif',animations:{enabled:false}},
+    theme:{mode:'dark'},
+    series:[{name:yName, data:pts, color:'#a78bfa'}],
+    markers:{size:7,strokeWidth:0,hover:{sizeOffset:2}},
+    dataLabels:{enabled:false},
+    xaxis:{
+      type:'numeric',title:{text:xName,style:{color:'#64748b',fontSize:'11px'}},
+      labels:{style:{colors:'#475569',fontSize:'10px'}}
+    },
+    yaxis:{
+      title:{text:yName,style:{color:'#64748b',fontSize:'11px'}},
+      labels:{style:{colors:'#475569',fontSize:'10px'}}
+    },
+    grid:{borderColor:'#1a1a24',strokeDashArray:4},
+    tooltip:{theme:'dark',intersect:true,shared:false,
+      custom({dataPointIndex}) {
+        const p = pts[dataPointIndex]
+        if (!p) return ''
+        const fmtV = v => typeof v === 'number' ? (v < 10 ? v.toFixed(1) : Math.round(v)) : v
+        return `<div style="padding:8px 12px;font-size:12px">`
+          + `<b>${xName}:</b> ${fmtV(p.x)}<br><b>${yName}:</b> ${fmtV(p.y)}</div>`
+      }
+    },
+  })
+  scatterChart.render()
+  $('scatter-overlay').classList.add('show')
+}
+
+function closeScatter() {
+  $('scatter-overlay').classList.remove('show')
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeScatter() })
+
+fetchData(0)
+</script>
+</body>
+</html>

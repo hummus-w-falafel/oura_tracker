@@ -1,0 +1,17 @@
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0c0c0f;color:#e2e8f0;font-family:'Orbitron',sans-serif}
+header{display:flex;justify-content:space-between;align-items:center}
+h1{font-size:.9rem;font-weight:600;color:#64748b;letter-spacing:.02em;text-transform:uppercase}
+.nav{display:flex;gap:4px;align-items:center}
+.nav a{color:#475569;text-decoration:none;font-size:.75rem;padding:5px 12px;border:1px solid #1e1e28;border-radius:0;transition:color .1s,border-color .1s}
+.nav a:hover,.nav a.on{color:#e2e8f0;border-color:#334155}
+.btns{display:flex;gap:4px}
+.btns button{background:#131318;border:1px solid #1e1e28;color:#475569;padding:5px 12px;border-radius:0;font-size:.75rem;cursor:pointer;font-family:inherit;transition:color .1s,border-color .1s}
+.btns button:hover,.btns button.on{color:#e2e8f0;border-color:#334155}
+.panel{background:#131318;border-radius:0;margin-bottom:12px}
+.plbl{font-size:.68rem;color:#475569;text-transform:uppercase;letter-spacing:.07em}
+.scroll-wrap{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;scrollbar-width:thin;scrollbar-color:#1e1e28 transparent}
+.scroll-wrap::-webkit-scrollbar{height:6px}
+.scroll-wrap::-webkit-scrollbar-track{background:transparent}
+.scroll-wrap::-webkit-scrollbar-thumb{background:#1e1e28;border-radius:0}
+.scroll-wrap::-webkit-scrollbar-thumb:hover{background:#334155}

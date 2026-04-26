@@ -1,0 +1,30 @@
+# Secrets and tokens
+.env
+tokens.json
+
+# Personal user profile (CLAUDE.md references PROFILE.md)
+PROFILE.md
+
+# Database
+health.db
+health.db-shm
+health.db-wal
+*.db-journal
+*.bak
+*.bak-*
+
+# Logs
+*.log
+
+# Scratch artifacts
+oura_snapshot.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.claude/
