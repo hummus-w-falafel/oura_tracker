@@ -374,6 +374,7 @@ def correlations_api():
         "meal_count", "last_meal_hour",
         "nutrition_score",
         "weed_count", "weed_g", "thc_mg",
+        "nicotine_count", "nicotine_mg",
         "alcohol_count", "alcohol_ml", "pure_alcohol_ml",
     ]
 
@@ -442,10 +443,13 @@ def correlations_api():
         else:
             row["nutrition_score"] = None
         weed = sb.get("weed", {}) if sb else {}
+        nic = sb.get("nicotine", {}) if sb else {}
         alc = sb.get("alcohol", {}) if sb else {}
         row["weed_count"] = weed.get("count", 0)
         row["weed_g"] = weed.get("total_amount") or 0
         row["thc_mg"] = round(weed["active_dose"] * 1000, 1) if weed.get("active_dose") else 0
+        row["nicotine_count"] = nic.get("count", 0)
+        row["nicotine_mg"] = nic.get("total_amount") or 0
         row["alcohol_count"] = alc.get("count", 0)
         row["alcohol_ml"] = alc.get("total_amount") or 0
         row["pure_alcohol_ml"] = round(alc["active_dose"], 1) if alc.get("active_dose") else 0

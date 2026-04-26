@@ -161,6 +161,8 @@ targets:
         payload = json.loads(response.data)
         self.assertIn("pvalues", payload)
         self.assertIn("counts", payload)
+        self.assertIn("nicotine_count", payload["features"])
+        self.assertIn("nicotine_mg", payload["features"])
 
 
 if __name__ == "__main__":

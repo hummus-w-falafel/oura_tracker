@@ -1,4 +1,4 @@
-# h_tracker
+# oura_tracker
 
 A self-hosted health analytics platform for the [Oura Ring](https://ouraring.com/), built to be operated by an AI agent.
 
