@@ -35,8 +35,10 @@ class OuraClient:
 
             resp = self.session.get(url, params=p)
 
-            # Endpoint not available for this ring/subscription
-            if resp.status_code in (401, 403, 404, 426):
+            # Endpoint not available for this ring/subscription.
+            # Do not swallow 401: an expired/revoked token must fail the sync
+            # loudly, otherwise sync_state advances while no Oura data is saved.
+            if resp.status_code in (403, 404, 426):
                 return []
 
             resp.raise_for_status()

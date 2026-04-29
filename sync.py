@@ -61,6 +61,26 @@ def sync_heartrate_start(full: bool) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def heartrate_windows(start_dt: str, end_dt: str, max_days: int = 30):
+    """Yield API-safe heartrate datetime windows.
+
+    Oura rejects heartrate ranges longer than 30 days, so full syncs need to be
+    split while incremental 48-hour syncs usually produce a single window.
+    """
+    start = datetime.fromisoformat(start_dt.replace("Z", "+00:00"))
+    end = datetime.fromisoformat(end_dt.replace("Z", "+00:00"))
+    step = timedelta(days=max_days)
+
+    cur = start
+    while cur < end:
+        nxt = min(cur + step, end)
+        yield (
+            cur.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            nxt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        cur = nxt
+
+
 def run_sync(full: bool = False):
     init_db()
     client = OuraClient()
@@ -117,7 +137,12 @@ def run_sync(full: bool = False):
     start_dt = sync_heartrate_start(full)
     end_dt = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
-        records = client.get_heart_rate(start_datetime=start_dt, end_datetime=end_dt)
+        records = []
+        for window_start, window_end in heartrate_windows(start_dt, end_dt):
+            records.extend(client.get_heart_rate(
+                start_datetime=window_start,
+                end_datetime=window_end,
+            ))
         with get_conn() as conn:
             upsert_heartrate_batch(conn, records)
             set_sync_state(conn, ep, now)

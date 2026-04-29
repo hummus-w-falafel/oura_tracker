@@ -4,7 +4,7 @@ A self-hosted health analytics platform for the [Oura Ring](https://ouraring.com
 
 It pulls everything Oura's API exposes — sleep, readiness, activity, HR, HRV, SpO2, workouts, sessions, vO2 max, vascular age — into a local SQLite database, augments it with custom logging (meals with USDA-backed nutrition lookup, workouts with set/rep tracking, substances, journal entries), and serves it through a Flask dashboard with three views: a Solo Leveling–style RPG status page, a continuous timeline dashboard, and a correlation explorer.
 
-The whole thing is designed to be driven by a coding agent. `CLAUDE.md` is tuned for Claude Code; `AGENTS.md` is the Codex-facing equivalent. The agent logs your meals, runs your queries, surfaces patterns. You don't write SQL — you have a conversation.
+The whole thing is designed to be driven by a coding agent. `CLAUDE.md` is tuned for Claude Code; `AGENTS.md` is the Codex-facing equivalent. The agent logs your meals, runs your queries, surfaces patterns. If you have any questions or want to make any changes just ask the agent!
 
 ## What's in the box
 

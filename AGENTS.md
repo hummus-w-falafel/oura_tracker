@@ -477,7 +477,23 @@ log_meal(
 Workout sets:
 
 ```python
-from db import log_workout_session
+from db import get_conn, log_workout_session, upsert_workout
+
+workout_id = "manual-kettlebell-2026-04-25-1800"
+record = {
+    "id": workout_id,
+    "day": "2026-04-25",
+    "activity": "kettlebell",
+    "intensity": "medium",
+    "source": "manual",
+    "start_datetime": "2026-04-25T18:00:00-04:00",
+    "end_datetime": "2026-04-25T18:25:00-04:00",
+    "calories": None,
+    "distance": None,
+    "label": "KB Session",
+}
+with get_conn() as conn:
+    upsert_workout(conn, record)
 
 log_workout_session(workout_id, "2026-04-25", [
     ("double KB press", 1, 7, 25.0),
@@ -485,7 +501,7 @@ log_workout_session(workout_id, "2026-04-25", [
 ])
 ```
 
-For workout logs, first find the parent Oura workout row in `workouts` and link sets via `workout_id` when possible. Use canonical exercise names from `PROFILE.md` when available so progression queries do not split history across aliases.
+For user-reported workouts, create or reuse a manual parent row in `workouts` with `source="manual"` and the appropriate `activity` value, such as `kettlebell`, `rowing`, or `strength_training`. Then link related detail rows, such as `workout_sets`, via `workout_id`. Use a stable ID such as `manual-activity-YYYY-MM-DD-HHMM` when creating the parent manually. These sessions are not expected to be auto-detected by Oura, and strength sessions should not be left as unlinked `workout_sets` rows. Use canonical exercise names from `PROFILE.md` when available so progression queries do not split history across aliases.
 
 Substances:
 

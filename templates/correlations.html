@@ -25,6 +25,11 @@
   .granger-meta{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;font-size:.62rem;color:#64748b}
   .granger-meta b{display:block;color:#94a3b8;font-size:.7rem;margin-top:2px}
   .badge{font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;color:#fbbf24;border:1px solid #3f3414;padding:2px 6px}
+  .detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}
+  .detail-cell{border:1px solid #1e1e28;background:#101015;padding:9px}
+  .detail-cell span{display:block;font-size:.62rem;color:#64748b;text-transform:uppercase;letter-spacing:.06em}
+  .detail-cell b{display:block;color:#cbd5e1;font-size:.86rem;margin-top:4px}
+  .detail-note{font-size:.72rem;color:#94a3b8;line-height:1.55;border-top:1px solid #1e1e28;padding-top:10px}
 
   /* Heatmap */
   .heatmap-wrap{overflow:auto;max-height:80vh}
@@ -39,9 +44,11 @@
   /* Scatter overlay */
   #scatter-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);display:none;z-index:100;justify-content:center;align-items:center}
   #scatter-overlay.show{display:flex}
-  #scatter-box{background:#131318;border:1px solid #1e1e28;border-radius:0;padding:20px;width:520px;max-width:95vw;position:relative}
-  #scatter-close{position:absolute;top:10px;right:14px;color:#64748b;cursor:pointer;font-size:18px;border:none;background:none}
-  #scatter-close:hover{color:#e2e8f0}
+  #granger-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);display:none;z-index:100;justify-content:center;align-items:center}
+  #granger-overlay.show{display:flex}
+  #scatter-box,#granger-box{background:#131318;border:1px solid #1e1e28;border-radius:0;padding:20px;width:520px;max-width:95vw;position:relative}
+  #scatter-close,#granger-close{position:absolute;top:10px;right:14px;color:#64748b;cursor:pointer;font-size:18px;border:none;background:none}
+  #scatter-close:hover,#granger-close:hover{color:#e2e8f0}
   #scatter-title{font-size:.8rem;color:#94a3b8;margin-bottom:4px}
   #scatter-stats{font-size:.7rem;color:#64748b;margin-bottom:10px}
   #scatter-chart{width:100%;height:300px}
@@ -94,6 +101,14 @@
   </div>
 </div>
 
+<div id="granger-overlay" onclick="if(event.target===this)closeGrangerDetail()">
+  <div id="granger-box">
+    <button id="granger-close" onclick="closeGrangerDetail()">&times;</button>
+    <div id="granger-detail-title" class="granger-title"></div>
+    <div id="granger-detail-body"></div>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.2/dist/apexcharts.min.js"></script>
 <script>
 const $ = id => document.getElementById(id)
@@ -101,6 +116,7 @@ let DATA = null
 let mode = 'pearson'
 let currentLag = 0
 let scatterChart = null
+let GRANGER = []
 
 const DESCRIPTIONS = {
   sleep_score:'Oura composite sleep quality score (0-100)',
@@ -281,6 +297,7 @@ function fetchData(lag) {
 }
 
 function renderGranger(data) {
+  GRANGER = []
   const mature = data.total_days >= data.mature_days
   $('granger-badge').textContent = mature ? 'Maturing' : 'Exploratory'
   $('granger-summary').innerHTML = `<b>${data.total_days}</b> daily observations · max lag <b>${data.max_lag}</b> day(s) · `
@@ -291,12 +308,13 @@ function renderGranger(data) {
     return
   }
   const renderRows = rows => rows.map(r => {
+    const idx = GRANGER.push(r) - 1
     const pred = NICE_NAMES[r.predictor] || r.predictor
     const out = NICE_NAMES[r.outcome] || r.outcome
     const pColor = typeof r.p === 'number' && r.p < 0.05 ? '#22c55e' : '#94a3b8'
     const direction = r.direction === 'higher' ? '+' : '-'
     const dirClass = r.direction === 'higher' ? 'granger-dir-pos' : 'granger-dir-neg'
-    return `<div class="granger-row" title="${r.note}">`
+    return `<div class="granger-row" onclick="showGrangerDetail(${idx})" title="${r.note}">`
       + `<div class="granger-title">${pred} → <span class="${dirClass}">${direction}</span> ${out}</div>`
       + `<div class="granger-meta">`
       + `<span>lag<b>${r.lag}d</b></span>`
@@ -320,6 +338,36 @@ function renderGranger(data) {
 
 function fetchGranger() {
   fetch('/api/granger?max_lag=2').then(r=>r.json()).then(renderGranger)
+}
+
+function showGrangerDetail(idx) {
+  const r = GRANGER[idx]
+  if (!r) return
+  const pred = NICE_NAMES[r.predictor] || r.predictor
+  const out = NICE_NAMES[r.outcome] || r.outcome
+  const dirWord = r.direction === 'higher' ? 'higher' : 'lower'
+  const dirClass = r.direction === 'higher' ? 'granger-dir-pos' : 'granger-dir-neg'
+  const pText = typeof r.p === 'number' && r.p < 0.05 ? 'passes the uncorrected 0.05 screen' : 'does not pass the uncorrected 0.05 screen'
+  $('granger-detail-title').innerHTML = `${pred} → <span class="${dirClass}">${dirWord}</span> ${out}`
+  $('granger-detail-body').innerHTML = `<div class="detail-grid">`
+    + `<div class="detail-cell"><span>Tier</span><b>${r.tier}</b></div>`
+    + `<div class="detail-cell"><span>Lag</span><b>${r.lag} day${r.lag === 1 ? '' : 's'}</b></div>`
+    + `<div class="detail-cell"><span>Model Rows</span><b>${r.n}</b></div>`
+    + `<div class="detail-cell"><span>Exposure Days</span><b>${r.exposure_days}</b></div>`
+    + `<div class="detail-cell"><span>F Statistic</span><b>${r.f}</b></div>`
+    + `<div class="detail-cell"><span>P Value</span><b>${r.p}</b></div>`
+    + `<div class="detail-cell"><span>Prediction Gain</span><b>${r.improvement_pct}%</b></div>`
+    + `<div class="detail-cell"><span>Direction</span><b class="${dirClass}">${dirWord}</b></div>`
+    + `<div class="detail-cell"><span>Status</span><b>${r.status}</b></div>`
+    + `</div>`
+    + `<div class="detail-note">This tests whether past ${pred} improves prediction of ${out} after controlling for ${out}'s own recent history. `
+    + `The full model reduced prediction error by ${r.improvement_pct}% versus the autoregressive baseline. `
+    + `The F value is the improvement relative to remaining noise, and the p value ${pText}. ${r.note}</div>`
+  $('granger-overlay').classList.add('show')
+}
+
+function closeGrangerDetail() {
+  $('granger-overlay').classList.remove('show')
 }
 
 function showScatter(key) {
@@ -368,7 +416,12 @@ function closeScatter() {
   $('scatter-overlay').classList.remove('show')
 }
 
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeScatter() })
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    closeScatter()
+    closeGrangerDetail()
+  }
+})
 
 fetchData(0)
 fetchGranger()
