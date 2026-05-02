@@ -91,7 +91,7 @@ Main tables:
 - `sleep_periods`
 - `heartrate`
 - `workouts`, `sessions`, `sleep_time`
-- `meals`, `substances`, `sex`, `journal`, `workout_sets`
+- `meals`, `meal_items`, `substances`, `sex`, `journal`, `workout_sets`
 - `leveling_daily_cache`
 
 Important schema notes:
@@ -101,7 +101,7 @@ Important schema notes:
 - `sleep_periods.type='long_sleep'` identifies main sleep. Short `type='sleep'` records are naps/rest detections.
 - `sleep_phase_5_min` is a digit string: `1=Deep`, `2=Light`, `3=REM`, `4=Awake`.
 - `heartrate` is high volume and should be downsampled for dashboard/API responses.
-- Manual meals live in `meals`; Oura meal data is not available through the API.
+- Manual meal totals live in `meals`; optional per-item nutrition detail lives in `meal_items`. Oura meal data is not available through the API.
 - Substance dose tracking uses `amount_value`, `amount_unit`, and `potency_pct`; `amount_deprecated` is legacy.
 - `workout_sets.weight_per_hand` is `0=single`, `1=each hand`.
 
@@ -176,6 +176,12 @@ Manual workouts can take hours to appear from the Oura API after being logged in
 `meals` stores custom meal logs:
 
 `id PK | logged_at | meal_type | description | calories | protein_g | carbs_g | fat_g | sat_fat_g | sugar_g | fiber_g | omega3_g | vitamin_d_mcg | b12_mcg | magnesium_mg | zinc_mg | iron_mg | potassium_mg | sodium_mg | vitamin_c_mg | vitamin_e_mg | vitamin_b6_mg | folate_mcg | notes | created_at`
+
+`meal_items` stores optional item-level detail for a meal:
+
+`id PK | meal_id FK->meals(id) | sort_order | item_name | quantity | unit | serving_grams | brand | restaurant | fdc_id | calories | protein_g | carbs_g | fat_g | sat_fat_g | sugar_g | fiber_g | omega3_g | vitamin_d_mcg | b12_mcg | magnesium_mg | zinc_mg | iron_mg | potassium_mg | sodium_mg | vitamin_c_mg | vitamin_e_mg | vitamin_b6_mg | folate_mcg | source | source_ref | confidence | notes | created_at`
+
+When a meal has `meal_items`, item rows are the detailed source and `db.rollup_meal_items()` recomputes the parent `meals` totals. Older or manually estimated meals may only have meal-level totals.
 
 `substances` stores custom substance logs:
 
@@ -423,7 +429,7 @@ log_meal_with_nutrition(
 - `(food_query: str, serving_grams: number)`
 - `(food_query: str, serving_grams: number, fdc_id: int)` when pinning a USDA entry
 
-The helper performs USDA lookup, maps totals into the `meals` nutrient columns, and writes a full JSON nutrient breakdown into `journal` with `category="nutrition"`.
+The helper performs USDA lookup, writes one parent row in `meals`, writes per-item rows in `meal_items`, rolls item totals up into the parent `meals` nutrient columns, and also writes a full JSON nutrient breakdown into `journal` with `category="nutrition"`.
 The journal day is derived with `time_utils.local_day(logged_at)`, not by slicing the timestamp.
 
 ```python
@@ -473,6 +479,38 @@ log_meal(
 ```
 
 `log_meal()` stores `logged_at`; its `day` parameter is currently only used for the console message. Still pass the matching local date for clarity.
+It returns the inserted `meal_id`. Use `log_meal_with_items()` when item-level nutrition is available; it writes `meal_items` and rolls up totals into `meals`.
+
+```python
+from db import log_meal_with_items
+
+log_meal_with_items(
+    "2026-04-25",
+    "dinner",
+    "dumplings and spring rolls",
+    [
+        {
+            "item_name": "pork dumplings",
+            "quantity": 12,
+            "unit": "pieces",
+            "calories": 600,
+            "protein_g": 30,
+            "source": "estimate",
+            "confidence": "estimate",
+        },
+        {
+            "item_name": "veggie spring rolls",
+            "quantity": 6,
+            "unit": "pieces",
+            "calories": 420,
+            "protein_g": 12,
+            "source": "estimate",
+            "confidence": "estimate",
+        },
+    ],
+    logged_at="2026-04-25T19:00:00-04:00",
+)
+```
 
 Workout sets:
 

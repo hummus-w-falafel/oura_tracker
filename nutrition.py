@@ -15,9 +15,9 @@ import os
 import requests
 from dotenv import load_dotenv
 
-from db import get_conn, log_meal, log_journal
+from db import add_meal_item, get_conn, insert_meal, rollup_meal_items
 from profile_targets import get_targets
-from time_utils import local_day
+from time_utils import ensure_tz, local_day, now_local
 
 load_dotenv()
 
@@ -229,43 +229,79 @@ def log_meal_with_nutrition(
     vit_d_iu = totals.get("vitamin_d_iu")
     vit_d_mcg = round(vit_d_iu / 40.0, 2) if vit_d_iu else None
 
+    logged_at = ensure_tz(logged_at) if logged_at else now_local()
     meal_day = local_day(logged_at)
 
-    log_meal(
-        day=meal_day,
-        meal_type=meal_type,
-        description=description,
-        calories=round(totals.get("calories_kcal", 0)),
-        protein_g=totals.get("protein_g"),
-        carbs_g=totals.get("carbs_g"),
-        fat_g=totals.get("fat_g"),
-        sat_fat_g=totals.get("saturated_fat_g"),
-        sugar_g=totals.get("sugar_g"),
-        fiber_g=totals.get("fiber_g"),
-        omega3_g=totals.get("omega3_g"),
-        vitamin_d_mcg=vit_d_mcg,
-        b12_mcg=totals.get("vitamin_b12_ug"),
-        magnesium_mg=totals.get("magnesium_mg"),
-        zinc_mg=totals.get("zinc_mg"),
-        iron_mg=totals.get("iron_mg"),
-        potassium_mg=totals.get("potassium_mg"),
-        sodium_mg=totals.get("sodium_mg"),
-        vitamin_c_mg=totals.get("vitamin_c_mg"),
-        vitamin_e_mg=totals.get("vitamin_e_mg"),
-        vitamin_b6_mg=totals.get("vitamin_b6_mg"),
-        folate_mcg=totals.get("folate_ug"),
-        notes=notes,
-        logged_at=logged_at,
-    )
+    with get_conn() as conn:
+        meal_id = insert_meal(
+            conn,
+            logged_at,
+            meal_type,
+            description,
+            calories=round(totals.get("calories_kcal", 0)),
+            protein_g=totals.get("protein_g"),
+            carbs_g=totals.get("carbs_g"),
+            fat_g=totals.get("fat_g"),
+            sat_fat_g=totals.get("saturated_fat_g"),
+            sugar_g=totals.get("sugar_g"),
+            fiber_g=totals.get("fiber_g"),
+            omega3_g=totals.get("omega3_g"),
+            vitamin_d_mcg=vit_d_mcg,
+            b12_mcg=totals.get("vitamin_b12_ug"),
+            magnesium_mg=totals.get("magnesium_mg"),
+            zinc_mg=totals.get("zinc_mg"),
+            iron_mg=totals.get("iron_mg"),
+            potassium_mg=totals.get("potassium_mg"),
+            sodium_mg=totals.get("sodium_mg"),
+            vitamin_c_mg=totals.get("vitamin_c_mg"),
+            vitamin_e_mg=totals.get("vitamin_e_mg"),
+            vitamin_b6_mg=totals.get("vitamin_b6_mg"),
+            folate_mcg=totals.get("folate_ug"),
+            notes=notes,
+        )
+        for idx, item in enumerate(result["items"], start=1):
+            vit_d_iu_item = item.get("vitamin_d_iu")
+            vit_d_mcg_item = round(vit_d_iu_item / 40.0, 2) if vit_d_iu_item else None
+            add_meal_item(conn, meal_id, {
+                "item_name": item.get("description"),
+                "quantity": item.get("serving_g"),
+                "unit": "g",
+                "serving_grams": item.get("serving_g"),
+                "fdc_id": item.get("fdc_id"),
+                "calories": item.get("calories_kcal"),
+                "protein_g": item.get("protein_g"),
+                "carbs_g": item.get("carbs_g"),
+                "fat_g": item.get("fat_g"),
+                "sat_fat_g": item.get("saturated_fat_g"),
+                "sugar_g": item.get("sugar_g"),
+                "fiber_g": item.get("fiber_g"),
+                "omega3_g": item.get("omega3_g"),
+                "vitamin_d_mcg": vit_d_mcg_item,
+                "b12_mcg": item.get("vitamin_b12_ug"),
+                "magnesium_mg": item.get("magnesium_mg"),
+                "zinc_mg": item.get("zinc_mg"),
+                "iron_mg": item.get("iron_mg"),
+                "potassium_mg": item.get("potassium_mg"),
+                "sodium_mg": item.get("sodium_mg"),
+                "vitamin_c_mg": item.get("vitamin_c_mg"),
+                "vitamin_e_mg": item.get("vitamin_e_mg"),
+                "vitamin_b6_mg": item.get("vitamin_b6_mg"),
+                "folate_mcg": item.get("folate_ug"),
+                "source": "USDA",
+                "source_ref": f"fdc:{item.get('fdc_id')}" if item.get("fdc_id") else None,
+                "confidence": "usda",
+            }, sort_order=idx)
+        rollup_meal_items(conn, meal_id)
 
-    # Store full nutrient detail in journal for future reference
-    detail = json.dumps({"items": result["items"], "totals": totals}, indent=2)
-    log_journal(
-        day=meal_day,
-        note=f"Meal: {description}\n{detail}",
-        category="nutrition"
-    )
+        # Store full nutrient detail in journal for future reference
+        detail = json.dumps({"items": result["items"], "totals": totals}, indent=2)
+        conn.execute(
+            "INSERT INTO journal (day, category, note) VALUES (?,?,?)",
+            (meal_day, "nutrition", f"Meal: {description}\n{detail}"),
+        )
 
+    result["meal_id"] = meal_id
+    print(f"Logged: {meal_type} on {meal_day} — {description}")
     return result
 
 

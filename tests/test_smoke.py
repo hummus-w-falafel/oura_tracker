@@ -36,6 +36,7 @@ class SmokeTests(unittest.TestCase):
         with self.db.get_conn() as conn:
             tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertIn("meals", tables)
+        self.assertIn("meal_items", tables)
         self.assertIn("workout_sets", tables)
         self.assertIn("leveling_daily_cache", tables)
 
@@ -58,9 +59,70 @@ class SmokeTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM sex").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM journal").fetchone()[0], 1)
 
+    def test_meal_item_logging_rolls_up_parent_totals(self):
+        meal_id = self.db.log_meal_with_items(
+            day="2026-04-25",
+            meal_type="dinner",
+            description="dumplings and spring rolls",
+            logged_at="2026-04-25T19:00:00-04:00",
+            items=[
+                {"item_name": "pork dumplings", "quantity": 12, "unit": "pieces", "calories": 600, "protein_g": 30},
+                {"item_name": "veggie spring rolls", "quantity": 6, "unit": "pieces", "calories": 420, "protein_g": 12},
+            ],
+        )
+
+        with self.db.get_conn() as conn:
+            meal = conn.execute("SELECT calories, protein_g FROM meals WHERE id=?", (meal_id,)).fetchone()
+            items = conn.execute(
+                "SELECT item_name, sort_order FROM meal_items WHERE meal_id=? ORDER BY sort_order",
+                (meal_id,),
+            ).fetchall()
+
+        self.assertEqual(meal["calories"], 1020)
+        self.assertEqual(meal["protein_g"], 42)
+        self.assertEqual([r["item_name"] for r in items], ["pork dumplings", "veggie spring rolls"])
+        self.assertEqual([r["sort_order"] for r in items], [1, 2])
+
+    def test_meal_item_logging_rolls_back_on_item_failure(self):
+        with self.assertRaises(ValueError):
+            self.db.log_meal_with_items(
+                day="2026-04-25",
+                meal_type="dinner",
+                description="bad structured meal",
+                logged_at="2026-04-25T19:00:00-04:00",
+                items=[{"calories": 100}],
+            )
+
+        with self.db.get_conn() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM meals").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM meal_items").fetchone()[0], 0)
+
     def test_usda_meal_logging_uses_local_day_for_journal(self):
         fake_lookup = {
-            "items": [{"description": "mock food"}],
+            "items": [{
+                "fdc_id": 123,
+                "description": "mock food",
+                "serving_g": 100,
+                "calories_kcal": 600,
+                "protein_g": 45,
+                "carbs_g": 50,
+                "fat_g": 20,
+                "saturated_fat_g": 5,
+                "sugar_g": 8,
+                "fiber_g": 9,
+                "omega3_g": 1.0,
+                "vitamin_d_iu": 400,
+                "vitamin_b12_ug": 2.0,
+                "magnesium_mg": 100,
+                "zinc_mg": 4,
+                "iron_mg": 3,
+                "potassium_mg": 800,
+                "sodium_mg": 700,
+                "vitamin_c_mg": 20,
+                "vitamin_e_mg": 3,
+                "vitamin_b6_mg": 0.4,
+                "folate_ug": 120,
+            }],
             "totals": {
                 "calories_kcal": 600,
                 "protein_g": 45,
@@ -93,13 +155,38 @@ class SmokeTests(unittest.TestCase):
 
         with self.db.get_conn() as conn:
             meal = conn.execute("SELECT logged_at, protein_g FROM meals").fetchone()
+            item = conn.execute("SELECT item_name, fdc_id, protein_g, source, confidence FROM meal_items").fetchone()
             journal = conn.execute("SELECT day, category, note FROM journal").fetchone()
 
         self.assertEqual(meal["logged_at"], "2026-04-25T03:30:00+00:00")
         self.assertEqual(meal["protein_g"], 45)
+        self.assertEqual(item["item_name"], "mock food")
+        self.assertEqual(item["fdc_id"], 123)
+        self.assertEqual(item["protein_g"], 45)
+        self.assertEqual(item["source"], "USDA")
+        self.assertEqual(item["confidence"], "usda")
         self.assertEqual(journal["day"], "2026-04-24")
         self.assertEqual(journal["category"], "nutrition")
         self.assertIn("mock meal", journal["note"])
+
+    def test_usda_meal_logging_rolls_back_on_item_failure(self):
+        fake_lookup = {
+            "items": [{"calories_kcal": 100}],
+            "totals": {"calories_kcal": 100},
+        }
+
+        with patch.object(self.nutrition, "lookup_multi", return_value=fake_lookup):
+            with self.assertRaises(ValueError):
+                self.nutrition.log_meal_with_nutrition(
+                    "bad usda meal",
+                    [("bad", 100)],
+                    logged_at="2026-04-25T12:00:00-04:00",
+                )
+
+        with self.db.get_conn() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM meals").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM meal_items").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM journal").fetchone()[0], 0)
 
     def test_workout_session_logging(self):
         with self.db.get_conn() as conn:

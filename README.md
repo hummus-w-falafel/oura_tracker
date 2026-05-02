@@ -2,7 +2,7 @@
 
 A self-hosted health analytics platform for the [Oura Ring](https://ouraring.com/), built to be operated by an AI agent.
 
-It pulls everything Oura's API exposes — sleep, readiness, activity, HR, HRV, SpO2, workouts, sessions, vO2 max, vascular age — into a local SQLite database, augments it with custom logging (meals with USDA-backed nutrition lookup, workouts with set/rep tracking, substances, journal entries), and serves it through a Flask dashboard with three views: a Solo Leveling–style RPG status page, a continuous timeline dashboard, and a correlation explorer.
+It pulls everything Oura's API exposes — sleep, readiness, activity, HR, HRV, SpO2, workouts, sessions, vO2 max, vascular age — into a local SQLite database, augments it with custom logging (meals with USDA-backed or item-level nutrition, workouts with set/rep tracking, substances, journal entries), and serves it through a Flask dashboard with three views: a Solo Leveling–style RPG status page, a continuous timeline dashboard, and a correlation explorer.
 
 The whole thing is designed to be driven by a coding agent. `CLAUDE.md` is tuned for Claude Code; `AGENTS.md` is the Codex-facing equivalent. The agent logs your meals, runs your queries, surfaces patterns. If you have any questions or want to make any changes just ask the agent!
 
@@ -10,7 +10,7 @@ The whole thing is designed to be driven by a coding agent. `CLAUDE.md` is tuned
 
 - **Full Oura API sync** with incremental updates and idempotent upserts
 - **SQLite database** with flat queryable columns + raw JSON for full fidelity
-- **USDA-backed nutrition logging** — 21 nutrients per meal, no manual entry
+- **Structured nutrition logging** — meal totals plus optional per-item rows, with USDA-backed lookup when appropriate
 - **Custom nutrition scoring** — sigmoid/gaussian curves over macros + micros (AHEI-2010 inspired)
 - **Solo Leveling RPG layer** — VIT/STR/END/NUT/DIS stats, XP, levels, ranks (see `LEVELING.md`)
 - **Correlation engine** — Pearson + normalized mutual information across ~30 daily features, with same-day and next-day lag
@@ -68,8 +68,9 @@ Logging meals, workouts, and substances is done through the agent — point it a
                                                   │
   USDA API  ──►  nutrition.py  ───────────────────┤
                                                   │
-  Agent     ──►  db.log_meal / log_substance  ────┤
-                   log_workout_session            │
+  Agent     ──►  db.py logging helpers  ──────────┤
+                  meals, substances, workouts     │
+                                                  │
                                                   │
                                                   ▼
                                                health.db  (SQLite)

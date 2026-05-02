@@ -15,7 +15,7 @@ The project root — wherever the repo was cloned. All scripts assume the workin
 | File | Purpose |
 |------|---------|
 | `auth.py` | Oura OAuth2 flow. Run once to get tokens. Tokens saved to `tokens.json`. |
-| `oura_client.py` | Full Oura API v2 client. All endpoints, auto-pagination, graceful 401 handling. |
+| `oura_client.py` | Full Oura API v2 client. All endpoints, auto-pagination, and loud auth failures on 401 responses. |
 | `db.py` | SQLite schema + upsert helpers. `init_db()` is idempotent. `health.db` is the database. |
 | `sync.py` | Incremental sync: `python3 sync.py` (daily), `python3 sync.py --full` (re-sync all), `python3 sync.py --status` (row counts). |
 | `check.py` | Human-readable text snapshot from DB: `python3 check.py [days]` or `python3 check.py --sync`. |
@@ -34,7 +34,7 @@ The project root — wherever the repo was cloned. All scripts assume the workin
 | `static/base.css` | Shared dashboard/status/correlation theme primitives. |
 | `PROFILE.md` | User's personal profile (gitignored). Read by the agent for personalization. See `PROFILE.example.md` for the template. |
 | `tests/test_smoke.py` | Standard-library smoke tests for DB init, logging helpers, timezone day derivation, leveling, and dashboard correlations. |
-| `health.db` | SQLite database (WAL mode) — all Oura data + meals + substances + journal + workout_sets + leveling cache. |
+| `health.db` | SQLite database (WAL mode) — all Oura data + meals/meal_items + substances + journal + workout_sets + leveling cache. |
 | `.env` | Credentials: `OURA_CLIENT_ID`, `OURA_CLIENT_SECRET`, `USDA_API_KEY`, `TIMEZONE`, `DISPLAY_NAME`. |
 
 ### Database schema
@@ -78,7 +78,11 @@ Note: manually logged workouts (e.g. Kettlebell) can take several hours to appea
 
 **`meals`** — custom, not from Oura (Oura has no meals API)
 `id PK | logged_at | meal_type | description | calories | protein_g | carbs_g | fat_g | sat_fat_g | sugar_g | fiber_g | omega3_g | vitamin_d_mcg | b12_mcg | magnesium_mg | zinc_mg | iron_mg | potassium_mg | sodium_mg | vitamin_c_mg | vitamin_e_mg | vitamin_b6_mg | folate_mcg | notes | created_at`
-Log via: `from nutrition import log_meal_with_nutrition` or `from db import log_meal`
+Meal totals are the compatibility/scoring layer used by dashboards and analytics. Log via: `from nutrition import log_meal_with_nutrition`, `from db import log_meal_with_items`, or `from db import log_meal`.
+
+**`meal_items`** — optional item-level detail under meals
+`id PK | meal_id FK->meals(id) | sort_order | item_name | quantity | unit | serving_grams | brand | restaurant | fdc_id | calories | protein_g | carbs_g | fat_g | sat_fat_g | sugar_g | fiber_g | omega3_g | vitamin_d_mcg | b12_mcg | magnesium_mg | zinc_mg | iron_mg | potassium_mg | sodium_mg | vitamin_c_mg | vitamin_e_mg | vitamin_b6_mg | folate_mcg | source | source_ref | confidence | notes | created_at`
+When present, item rows are the detailed source. `db.rollup_meal_items()` recomputes parent `meals` totals. Older manually estimated meals may only have meal-level totals.
 
 **`substances`** — tracks intake of cannabis, alcohol, caffeine, nicotine
 `id PK | logged_at | substance (weed|caffeine|nicotine|alcohol) | amount_deprecated TEXT | notes | created_at | amount_value REAL | amount_unit TEXT | potency_pct REAL`
@@ -120,7 +124,7 @@ Dose tracking: `amount_value` = numeric quantity (e.g. 0.25g weed, 300ml soju), 
 Oura timestamps are stored as UTC strings. Manual logs should use timezone-aware ISO strings whenever possible. Display and health-day grouping use the configured local timezone, defaulting to `America/Toronto`. Use `time_utils.local_day()` instead of slicing timestamps; UTC timestamps near midnight can belong to the previous local day.
 
 ### Known data quirks
-- Meals logged in Oura app are NOT accessible via API — must use custom `meals` table
+- Meals logged in Oura app are NOT accessible via API — use custom `meals` totals and optional `meal_items` detail
 - Manually logged workouts in Oura app (e.g. Kettlebell) have a multi-hour API propagation delay
 - `daily_stress` fields are all zero until user actively engages Oura stress tracking
 - `sleep_time` recommendations require minimum ~7 nights of data — status will be `not_enough_nights` until then
@@ -131,10 +135,43 @@ Oura timestamps are stored as UTC strings. Manual logs should use timezone-aware
 USDA FoodData Central API. Key functions in `nutrition.py`:
 - `lookup(query, serving_g)` — search + extract nutrients for one food
 - `lookup_multi([(food, grams), ...])` — multi-item meal with totals; a third tuple element pins a USDA `fdc_id`
-- `log_meal_with_nutrition(description, items, meal_type, logged_at, notes)` — lookup + store in DB + log detail to journal. Journal day is derived with `time_utils.local_day()`.
+- `log_meal_with_nutrition(description, items, meal_type, logged_at, notes)` — lookup + store parent totals in `meals`, store per-item rows in `meal_items`, roll item totals up, and log detail to journal. Journal day is derived with `time_utils.local_day()`.
+- `log_meal_with_items(day, meal_type, description, items, notes, logged_at)` — manually log structured item rows and roll them up into `meals`.
 - `compute_nutrition_score(day_totals)` — 0-100 score using sigmoid/gaussian curves (AHEI-2010 inspired, asymmetric penalties for excess sat fat/sugar/sodium, sigmoid rewards for protein/fiber/micros). Numeric targets come from the `PROFILE.md` fenced YAML block when present.
 
 Tracks 21 nutrients: calories, protein, fat, carbs, fiber, saturated fat, sugar, omega-3, vitamin D, B12, magnesium, zinc, iron, potassium, sodium, vitamin C, vitamin E, vitamin B6, folate.
+
+Manual item-level meal example:
+```python
+from db import log_meal_with_items
+
+log_meal_with_items(
+    "2026-04-25",
+    "dinner",
+    "dumplings and spring rolls",
+    [
+        {
+            "item_name": "pork dumplings",
+            "quantity": 12,
+            "unit": "pieces",
+            "calories": 600,
+            "protein_g": 30,
+            "source": "estimate",
+            "confidence": "estimate",
+        },
+        {
+            "item_name": "veggie spring rolls",
+            "quantity": 6,
+            "unit": "pieces",
+            "calories": 420,
+            "protein_g": 12,
+            "source": "estimate",
+            "confidence": "estimate",
+        },
+    ],
+    logged_at="2026-04-25T19:00:00-04:00",
+)
+```
 
 ### Dashboard architecture
 Flask backend (`dashboard.py`) + multi-page frontend. Three pages with shared nav (Level, Dashboard, Correlations).
@@ -169,7 +206,7 @@ You are working with a personal health time-series database. Think like an analy
 | Quick status check (scores, sleep, meals, HR summary) | `python3 check.py [days]` |
 | Specific analytical query | Direct SQL via `sqlite3 health.db` or Python with `db.get_conn()` |
 | Fresh data from Oura API | `from oura_client import OuraClient; c = OuraClient()` |
-| Nutrition lookup | `from nutrition import lookup, lookup_multi, log_meal_with_nutrition` |
+| Nutrition lookup/logging | `from nutrition import lookup, lookup_multi, log_meal_with_nutrition`; `from db import log_meal_with_items` |
 | Log a training session | `from db import log_workout_session` (see "Logging workouts" below) |
 | Dashboard visualization | Edit `dashboard.py` (backend) and `templates/dashboard.html` (frontend) |
 

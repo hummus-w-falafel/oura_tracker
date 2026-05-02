@@ -257,6 +257,47 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_meals_logged_at ON meals(logged_at);
 
+        -- ── Meal items (optional detailed layer under meals) ───────────────
+        -- When present, item rows are the detailed source used to roll up the
+        -- parent meal totals. Older meals may only have meal-level totals.
+        CREATE TABLE IF NOT EXISTS meal_items (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            meal_id         INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
+            sort_order      INTEGER,
+            item_name       TEXT NOT NULL,
+            quantity        REAL,
+            unit            TEXT,
+            serving_grams   REAL,
+            brand           TEXT,
+            restaurant      TEXT,
+            fdc_id          INTEGER,
+            calories        REAL,
+            protein_g       REAL,
+            carbs_g         REAL,
+            fat_g           REAL,
+            sat_fat_g       REAL,
+            sugar_g         REAL,
+            fiber_g         REAL,
+            omega3_g        REAL,
+            vitamin_d_mcg   REAL,
+            b12_mcg         REAL,
+            magnesium_mg    REAL,
+            zinc_mg         REAL,
+            iron_mg         REAL,
+            potassium_mg    REAL,
+            sodium_mg       REAL,
+            vitamin_c_mg    REAL,
+            vitamin_e_mg    REAL,
+            vitamin_b6_mg   REAL,
+            folate_mcg      REAL,
+            source          TEXT,
+            source_ref      TEXT,
+            confidence      TEXT,
+            notes           TEXT,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_meal_items_meal_id ON meal_items(meal_id);
+
         -- ── Substance intake ─────────────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS substances (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -335,6 +376,13 @@ def init_db():
 # ── Upsert helpers ────────────────────────────────────────────────────────────
 
 NOW = lambda: datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+MEAL_NUTRIENT_COLUMNS = [
+    "calories", "protein_g", "carbs_g", "fat_g", "sat_fat_g", "sugar_g",
+    "fiber_g", "omega3_g", "vitamin_d_mcg", "b12_mcg", "magnesium_mg",
+    "zinc_mg", "iron_mg", "potassium_mg", "sodium_mg", "vitamin_c_mg",
+    "vitamin_e_mg", "vitamin_b6_mg", "folate_mcg",
+]
 
 
 def upsert_daily_sleep(conn, record: dict):
@@ -586,6 +634,30 @@ def _now_local() -> str:
     return now_local()
 
 
+def insert_meal(conn, logged_at: str, meal_type: str, description: str,
+                calories: int = None, protein_g: float = None,
+                carbs_g: float = None, fat_g: float = None,
+                sat_fat_g: float = None, sugar_g: float = None,
+                fiber_g: float = None, omega3_g: float = None,
+                vitamin_d_mcg: float = None, b12_mcg: float = None,
+                magnesium_mg: float = None, zinc_mg: float = None,
+                iron_mg: float = None, potassium_mg: float = None,
+                sodium_mg: float = None, vitamin_c_mg: float = None,
+                vitamin_e_mg: float = None, vitamin_b6_mg: float = None,
+                folate_mcg: float = None, notes: str = None):
+    """Insert a meal using an existing transaction and return meal_id."""
+    cur = conn.execute(
+        "INSERT INTO meals (logged_at, meal_type, description, calories, protein_g, carbs_g, fat_g, "
+        "sat_fat_g, sugar_g, fiber_g, omega3_g, vitamin_d_mcg, b12_mcg, magnesium_mg, zinc_mg, "
+        "iron_mg, potassium_mg, sodium_mg, vitamin_c_mg, vitamin_e_mg, vitamin_b6_mg, folate_mcg, notes) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (logged_at, meal_type, description, calories, protein_g, carbs_g, fat_g,
+         sat_fat_g, sugar_g, fiber_g, omega3_g, vitamin_d_mcg, b12_mcg, magnesium_mg, zinc_mg,
+         iron_mg, potassium_mg, sodium_mg, vitamin_c_mg, vitamin_e_mg, vitamin_b6_mg, folate_mcg, notes)
+    )
+    return cur.lastrowid
+
+
 def log_meal(day: str, meal_type: str, description: str,
              calories: int = None, protein_g: float = None,
              carbs_g: float = None, fat_g: float = None,
@@ -605,16 +677,90 @@ def log_meal(day: str, meal_type: str, description: str,
         logged_at = _ensure_tz(logged_at)
     day = day or local_day(logged_at)
     with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO meals (logged_at, meal_type, description, calories, protein_g, carbs_g, fat_g, "
-            "sat_fat_g, sugar_g, fiber_g, omega3_g, vitamin_d_mcg, b12_mcg, magnesium_mg, zinc_mg, "
-            "iron_mg, potassium_mg, sodium_mg, vitamin_c_mg, vitamin_e_mg, vitamin_b6_mg, folate_mcg, notes) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (logged_at, meal_type, description, calories, protein_g, carbs_g, fat_g,
-             sat_fat_g, sugar_g, fiber_g, omega3_g, vitamin_d_mcg, b12_mcg, magnesium_mg, zinc_mg,
-             iron_mg, potassium_mg, sodium_mg, vitamin_c_mg, vitamin_e_mg, vitamin_b6_mg, folate_mcg, notes)
+        meal_id = insert_meal(
+            conn, logged_at, meal_type, description,
+            calories, protein_g, carbs_g, fat_g, sat_fat_g, sugar_g,
+            fiber_g, omega3_g, vitamin_d_mcg, b12_mcg, magnesium_mg,
+            zinc_mg, iron_mg, potassium_mg, sodium_mg, vitamin_c_mg,
+            vitamin_e_mg, vitamin_b6_mg, folate_mcg, notes,
         )
     print(f"Logged: {meal_type} on {day} — {description}")
+    return meal_id
+
+
+def add_meal_item(conn, meal_id: int, item: dict, sort_order: int = None):
+    """Insert one detailed meal item row under an existing meal."""
+    columns = [
+        "meal_id", "sort_order", "item_name", "quantity", "unit", "serving_grams",
+        "brand", "restaurant", "fdc_id",
+        *MEAL_NUTRIENT_COLUMNS,
+        "source", "source_ref", "confidence", "notes",
+    ]
+    values = [
+        meal_id,
+        sort_order if sort_order is not None else item.get("sort_order"),
+        item.get("item_name") or item.get("description") or item.get("name"),
+        item.get("quantity"),
+        item.get("unit"),
+        item.get("serving_grams") if item.get("serving_grams") is not None else item.get("serving_g"),
+        item.get("brand"),
+        item.get("restaurant"),
+        item.get("fdc_id"),
+        *[item.get(col) for col in MEAL_NUTRIENT_COLUMNS],
+        item.get("source"),
+        item.get("source_ref"),
+        item.get("confidence"),
+        item.get("notes"),
+    ]
+    if not values[2]:
+        raise ValueError("meal item requires item_name or description")
+    placeholders = ",".join(["?"] * len(columns))
+    cur = conn.execute(
+        f"INSERT INTO meal_items ({','.join(columns)}) VALUES ({placeholders})",
+        values,
+    )
+    return cur.lastrowid
+
+
+def rollup_meal_items(conn, meal_id: int):
+    """Recompute parent meal nutrient totals from item rows."""
+    select_cols = ", ".join(
+        f"SUM({col}) AS {col}" for col in MEAL_NUTRIENT_COLUMNS
+    )
+    totals = conn.execute(
+        f"SELECT {select_cols} FROM meal_items WHERE meal_id = ?",
+        (meal_id,),
+    ).fetchone()
+    if not totals:
+        return
+    updates = {col: totals[col] for col in MEAL_NUTRIENT_COLUMNS}
+    if updates["calories"] is not None:
+        updates["calories"] = round(updates["calories"])
+    for col, value in list(updates.items()):
+        if value is not None and col != "calories":
+            updates[col] = round(value, 2)
+    assignments = ", ".join(f"{col}=?" for col in MEAL_NUTRIENT_COLUMNS)
+    conn.execute(
+        f"UPDATE meals SET {assignments} WHERE id=?",
+        [updates[col] for col in MEAL_NUTRIENT_COLUMNS] + [meal_id],
+    )
+
+
+def log_meal_with_items(day: str, meal_type: str, description: str,
+                        items: list[dict], notes: str = None, logged_at: str = None):
+    """Log a meal with structured item rows and rolled-up parent totals."""
+    if not logged_at:
+        logged_at = _now_local()
+    else:
+        logged_at = _ensure_tz(logged_at)
+    day = day or local_day(logged_at)
+    with get_conn() as conn:
+        meal_id = insert_meal(conn, logged_at, meal_type, description, notes=notes)
+        for idx, item in enumerate(items, start=1):
+            add_meal_item(conn, meal_id, item, sort_order=idx)
+        rollup_meal_items(conn, meal_id)
+    print(f"Logged: {meal_type} on {day} — {description}")
+    return meal_id
 
 
 def log_substance(logged_at: str, substance: str, amount_value: float = None,
