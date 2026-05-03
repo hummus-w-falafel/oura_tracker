@@ -42,6 +42,16 @@
 <div class="panel"><div class="plbl">Sleep HRV</div><div class="scroll-wrap" id="scroll-hrv"><div id="ch-hrv"></div></div></div>
 <div class="panel"><div class="plbl" style="display:flex;justify-content:space-between;align-items:center">Macros vs Targets<button class="toggle-btn" id="macro-toggle" onclick="toggleNutView('macro')">Summary</button></div><div id="ch-macro"></div></div>
 <div class="panel"><div class="plbl" style="display:flex;justify-content:space-between;align-items:center">Micronutrients vs Targets<button class="toggle-btn" id="micro-toggle" onclick="toggleNutView('micro')">Summary</button></div><div id="ch-micro"></div></div>
+<div class="panel">
+  <div class="plbl" style="display:flex;justify-content:space-between;align-items:center">
+    Strength Training
+    <div class="btns">
+      <button id="strength-daily" onclick="setStrengthView('daily')">Daily</button>
+      <button id="strength-weekly" class="on" onclick="setStrengthView('weekly')">Weekly</button>
+    </div>
+  </div>
+  <div id="ch-strength"></div>
+</div>
 <div class="panel"><div class="plbl">Daily Scores</div><div id="ch-scores"></div></div>
 <div class="panel"><div class="plbl">Bedtime vs Recovery</div><div id="ch-bedtime"></div></div>
 
@@ -497,6 +507,18 @@ function nutAgg(data) {
   return dayMap
 }
 
+function chartDateLabel(day) {
+  const dt = new Date(day + 'T12:00:00')
+  return dt.toLocaleDateString('en-US', {month:'short', day:'numeric'})
+}
+
+const DATE_AXIS_LABELS = {
+  style: { colors:'#475569', fontSize:'11px' },
+  rotate: -45,
+  rotateAlways: true,
+  trim: false,
+}
+
 // Store chart state for toggle
 const nutState = { macro: {}, micro: {} }
 
@@ -507,10 +529,7 @@ function nutBarChart(id, dayMap, defs, height) {
   const days = Object.keys(dayMap).sort()
   if (!days.length) return
   const p = (v, t) => Math.min(Math.round(v / t * 100), 200)
-  const labels = days.map(d => {
-    const dt = new Date(d + 'T12:00:00')
-    return dt.toLocaleDateString('en-US', {month:'short', day:'numeric'})
-  })
+  const labels = days.map(chartDateLabel)
   const series = defs.map(m => ({
     name: m.label, color: m.color,
     data: days.map(d => p(dayMap[d][m.key], m.target))
@@ -521,7 +540,7 @@ function nutBarChart(id, dayMap, defs, height) {
     plotOptions: { bar:{ columnWidth:'70%', borderRadius:3 } },
     dataLabels: { enabled:false },
     stroke:     { show:false },
-    xaxis: { categories: labels, labels:{style:{colors:'#475569',fontSize:'11px'}} },
+    xaxis: { categories: labels, labels: DATE_AXIS_LABELS },
     yaxis: { min:0, max:200, tickAmount:4,
              labels:{style:{colors:'#475569',fontSize:'11px'}, formatter:v=>v+'%'} },
     annotations: { yaxis:[{ y:100, borderColor:'#334155', strokeDashArray:4,
@@ -633,6 +652,118 @@ function microChart(data) {
   ], 220)
 }
 
+const STRENGTH_COLORS = ['#fbbf24','#22c55e','#a78bfa','#38bdf8','#f87171','#e2e8f0','#fb923c']
+let STRENGTH_DATA = null
+let strengthView = 'weekly'
+
+function strengthColor(exercise, names) {
+  return STRENGTH_COLORS[names.indexOf(exercise) % STRENGTH_COLORS.length]
+}
+
+function fmtWeight(w, style) {
+  if (!w) return 'bodyweight'
+  return `${w}${style === 'each hand' ? ' each' : ''}`
+}
+
+function setStrengthView(view) {
+  strengthView = view
+  ;['daily','weekly'].forEach(v => $('strength-'+v).classList.toggle('on', v === view))
+  if (STRENGTH_DATA) drawStrengthChart(STRENGTH_DATA)
+}
+
+function setLine(items) {
+  return items.map(set => set.weight_lbs
+    ? `${set.reps} @ ${fmtWeight(set.weight_lbs,set.style)}`
+    : `${set.reps} reps`
+  ).join(' / ')
+}
+
+function strengthDetailLines(details) {
+  if (strengthView === 'daily') return setLine(details)
+  const byDay = {}
+  ;(details || []).forEach(set => {
+    if (!byDay[set.day]) byDay[set.day] = []
+    byDay[set.day].push(set)
+  })
+  return Object.keys(byDay).sort().map(day =>
+    `<div><span style="color:#64748b">${day}</span> ${setLine(byDay[day])}</div>`
+  ).join('')
+}
+
+function bestSet(details) {
+  return (details || []).reduce((best, set) => !best || set.load > best.load ? set : best, null)
+}
+
+function drawStrengthChart(data) {
+  const exercises = [...new Set([
+    ...data.daily_sets.map(r => r.exercise),
+    ...data.weekly_sets.map(r => r.exercise),
+  ])].sort()
+
+  if (!data.total_sets) {
+    draw('ch-strength', { ...BASE, chart:{...BASE.chart,type:'bar',height:260}, series:[], noData:{text:'No strength sets'} })
+    return
+  }
+
+  const rows = strengthView === 'daily' ? data.daily_sets : data.weekly_sets
+  const labelKey = strengthView === 'daily' ? 'day' : 'week_start'
+  const categories = strengthView === 'daily'
+    ? (data.days || [...new Set(rows.map(r => r.day))].sort())
+    : ((data.weeks && data.weeks.length) ? data.weeks.map(w => w.week_start) : [...new Set(rows.map(r => r.week_start))].sort())
+  const weekLabels = {}
+  ;(data.weeks || []).forEach(w => { weekLabels[w.week_start] = w.week })
+  const strengthAxisLabels = strengthView === 'daily'
+    ? {...DATE_AXIS_LABELS, formatter:chartDateLabel}
+    : {style:{colors:'#475569',fontSize:'11px'}, formatter:v=>weekLabels[v] || v}
+  const volumeSeries = exercises.map(ex => ({
+    name: ex,
+    type: 'bar',
+    color: strengthColor(ex, exercises),
+    data: categories.map(cat => {
+      const row = rows.find(r => r[labelKey] === cat && r.exercise === ex)
+      return {x:cat, y:row ? row.sets : 0, meta:row || {exercise:ex, details:[]}}
+    })
+  }))
+
+  draw('ch-strength', { ...BASE,
+    chart:{...BASE.chart,type:'bar',height:280,stacked:true,toolbar:{show:false},zoom:{enabled:false}},
+    series:volumeSeries,
+    plotOptions:{bar:{columnWidth:'55%',borderRadius:2}},
+    dataLabels:{enabled:false},
+    stroke:{show:false},
+    xaxis:{type:'category',categories,labels:strengthAxisLabels},
+    yaxis:{min:0,labels:{style:{colors:'#475569',fontSize:'10px'},formatter:v=>Math.round(v)},title:{text:'sets',style:{color:'#475569',fontSize:'10px'}}},
+    legend:{...LEGEND,fontSize:'10px'},
+    tooltip:{theme:'dark',shared:false,intersect:true,
+      custom({seriesIndex,dataPointIndex,w}) {
+        const sIdx = seriesIndex ?? 0
+        const dIdx = dataPointIndex ?? 0
+        const pt = w.config.series[sIdx] && w.config.series[sIdx].data[dIdx]
+        if (!pt || !pt.meta || !pt.y) return ''
+        const m = pt.meta
+        const best = bestSet(m.details || [])
+        const unit = best && best.weight_lbs ? 'lb-reps' : 'reps'
+        const bestLine = best
+          ? `<div>Best set: <b>${best.reps}</b> @ <b>${fmtWeight(best.weight_lbs,best.style)}</b> <span style="color:#64748b">(${best.load} ${unit})</span></div>`
+          : ''
+        return `<div style="padding:8px 12px;font-size:11px;line-height:1.6;max-width:320px">
+          <div style="color:#e2e8f0;font-weight:600">${m.exercise}</div>
+          <div style="color:#64748b">${strengthView === 'daily' ? m.day : m.week}</div>
+          <div><b>${m.sets}</b> sets</div>
+          ${bestLine}
+          <div style="color:#94a3b8;margin-top:3px">${strengthDetailLines(m.details || [])}</div>
+        </div>`
+      }
+    },
+  })
+}
+
+async function strengthChart(n) {
+  const data = await fetch('/api/strength/'+n).then(r=>r.json())
+  STRENGTH_DATA = data
+  drawStrengthChart(data)
+}
+
 async function scoresChart(n) {
   const {scores} = await fetch('/api/scores/'+n).then(r=>r.json())
   if (!scores.length) return
@@ -737,6 +868,7 @@ async function load(n) {
   ;[7,14,30].forEach(d => $('b'+d).classList.toggle('on', d===n))
   const [data] = await Promise.all([
     fetch('/api/continuous/'+n).then(r=>r.json()),
+    strengthChart(n),
     scoresChart(n),
     bedtimeChart(n),
   ])

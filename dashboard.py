@@ -214,6 +214,76 @@ def scores(days):
     } for d in all_days]})
 
 
+@app.route("/api/strength/<int:days>")
+def strength(days):
+    today = datetime.now(TZ).date()
+    start_day = today - timedelta(days=max(days, 1) - 1)
+    day_axis = [(start_day + timedelta(days=i)).isoformat() for i in range((today - start_day).days + 1)]
+    first_week_start = start_day - timedelta(days=start_day.weekday())
+    week_axis = []
+    week_start = first_week_start
+    while week_start <= today:
+        week_axis.append({
+            "week_start": week_start.isoformat(),
+            "week": week_start.strftime("%Y-W%W"),
+        })
+        week_start += timedelta(days=7)
+
+    rows = q(
+        "SELECT workout_day, exercise, set_number, reps, weight_lbs, weight_per_hand, notes"
+        " FROM workout_sets WHERE workout_day >= ?"
+        " ORDER BY workout_day, exercise, set_number",
+        (start_day.isoformat(),)
+    )
+
+    def set_load(r):
+        weight = r["weight_lbs"] or 0
+        implements = 2 if r["weight_per_hand"] else 1
+        if weight <= 0:
+            return r["reps"] or 0
+        return round((r["reps"] or 0) * weight * implements, 1)
+
+    daily = {}
+    weekly = {}
+    for r in rows:
+        day = r["workout_day"]
+        exercise = r["exercise"]
+        workout_date = datetime.fromisoformat(day).date()
+        week_start = (workout_date - timedelta(days=workout_date.weekday())).isoformat()
+        week = workout_date.strftime("%Y-W%W")
+        load = set_load(r)
+        set_detail = {
+            "set_number": r["set_number"],
+            "day": day,
+            "reps": r["reps"],
+            "weight_lbs": r["weight_lbs"] or 0,
+            "style": "each hand" if r["weight_per_hand"] else "single",
+            "notes": r["notes"],
+            "load": load,
+        }
+        day_bucket = daily.setdefault((day, exercise), [])
+        day_bucket.append(set_detail)
+        week_bucket = weekly.setdefault((week_start, week, exercise), [])
+        week_bucket.append(set_detail)
+
+    daily_sets = [
+        {"day": day, "exercise": exercise, "sets": len(sets), "details": sorted(sets, key=lambda s: s["set_number"] or 0)}
+        for (day, exercise), sets in sorted(daily.items())
+    ]
+    weekly_sets = [
+        {"week_start": week_start, "week": week, "exercise": exercise, "sets": len(sets), "details": sorted(sets, key=lambda s: s["set_number"] or 0)}
+        for (week_start, week, exercise), sets in sorted(weekly.items())
+    ]
+
+    return jsonify({
+        "days": day_axis,
+        "weeks": week_axis,
+        "daily_sets": daily_sets,
+        "weekly_sets": weekly_sets,
+        "total_sets": len(rows),
+    })
+
+
 # --- bedtime vs recovery scatter ---
 @app.route("/api/bedtime/<int:days>")
 def bedtime(days):

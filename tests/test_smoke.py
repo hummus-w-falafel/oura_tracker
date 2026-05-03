@@ -268,6 +268,29 @@ targets:
         self.assertIn("mature_days", payload)
         self.assertIn("results", payload)
 
+    def test_dashboard_strength_api_smoke(self):
+        with self.db.get_conn() as conn:
+            conn.execute(
+                "INSERT INTO workouts (id, day, activity, source, start_datetime, end_datetime) VALUES (?,?,?,?,?,?)",
+                ("w1", "2026-04-25", "kettlebell", "manual", "2026-04-25T18:00:00Z", "2026-04-25T18:30:00Z"),
+            )
+        self.db.log_workout_session("w1", "2026-04-25", [
+            ("double KB press", 1, 5, 25.0),
+            ("double KB press", 2, 6, 25.0),
+        ])
+
+        client = self.dashboard.app.test_client()
+        response = client.get("/api/strength/30")
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data)
+        self.assertEqual(payload["total_sets"], 2)
+        self.assertIn("2026-04-25", payload["days"])
+        self.assertTrue(any(w["week"] == "2026-W16" for w in payload["weeks"]))
+        self.assertEqual(payload["daily_sets"][0]["exercise"], "double KB press")
+        self.assertEqual(payload["daily_sets"][0]["sets"], 2)
+        self.assertEqual(payload["daily_sets"][0]["details"][1]["reps"], 6)
+        self.assertEqual(payload["daily_sets"][0]["details"][1]["load"], 300)
+
 
 if __name__ == "__main__":
     unittest.main()
