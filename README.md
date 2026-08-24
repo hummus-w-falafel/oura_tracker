@@ -72,26 +72,26 @@ Logging meals, workouts, and substances is done through the agent — point it a
 ## Architecture
 
 ```
-  Oura API  ──►  oura_client.py  ──►  sync.py ────┐
-                                                  │
-  USDA API  ──►  nutrition.py  ───────────────────┤
-                                                  │
-  Withings  ──►  withings_client.py ─► withings_sync.py
-                                                  │
-  Agent     ──►  db.py logging helpers  ──────────┤
-                  meals, substances, workouts     │
-                                                  │
-                                                  │
-                                                  ▼
-                                               health.db  (SQLite)
-                                                  │
-                                                  ▼
-                                             dashboard.py  (Flask, uses leveling + nutrition scoring)
-                                                  │
-                           ┌──────────────┬──────────────┬──────────────┐
-                           ▼              ▼              ▼              ▼
-                           /           /status     /correlations   /analytics
-                       (timeline)     (RPG stats)  (Pearson + MI)  (time series)
+  Oura API  ──►  oura_client.py  ──►  sync.py ───────────┐
+                                                         │
+  USDA API  ──►  nutrition.py  ──────────────────────────┤
+                                                         │
+  Withings  ──►  withings_client.py ─► withings_sync.py ─┤
+                                                         │
+  Agent     ──►  db.py logging helpers  ─────────────────┤
+                  meals, substances, workouts            │
+                                                         │
+                                                         │
+                                                         ▼
+                                                     health.db  (SQLite)
+                                                         │
+                                                         ▼
+                                                    dashboard.py  (Flask, uses leveling + nutrition scoring)
+                                                         │
+                                  ┌──────────────┬──────────────┬──────────────┐
+                                  ▼              ▼              ▼              ▼
+                                  /           /status     /correlations   /analytics
+                              (timeline)     (RPG stats)  (Pearson + MI)  (time series)
 ```
 
 See `CLAUDE.md` or `AGENTS.md` for the full database schema, sync strategy, and analytical patterns.
