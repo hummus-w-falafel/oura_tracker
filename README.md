@@ -1,6 +1,6 @@
 # oura_tracker
 
-A self-hosted health analytics platform for the [Oura Ring](https://ouraring.com/) and Withings scale data, built to be operated by an AI agent.
+A self-hosted health analytics platform for the [Oura Ring](https://ouraring.com/) and [Withings scale](https://www.withings.com/) data, built to be operated by an AI agent.
 
 It pulls everything Oura's API exposes — sleep, readiness, activity, HR, HRV, SpO2, workouts, sessions, vO2 max, vascular age — plus Withings Body Comp measurements into a local SQLite database, augments it with custom logging (meals with USDA-backed or item-level nutrition, workouts with set/rep tracking, substances, travel, journal entries), and serves it through a Flask dashboard with timeline, RPG status, correlation, and advanced time-series views.
 
