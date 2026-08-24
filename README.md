@@ -8,11 +8,13 @@ The whole thing is designed to be driven by a coding agent. `CLAUDE.md` is tuned
 
 ## Screenshots
 
-![Leveling](docs/screenshots/leveling-dashboard.png)
+<p align="center">
+  <img src="docs/screenshots/leveling-dashboard.png" width="58%" alt="Health RPG level and stat dashboard">
+  <img src="docs/screenshots/meal-nutrition-detail.png" width="36%" alt="Meal-level macro, mineral, and vitamin breakdown">
+</p>
+<p align="center"></p>
 
 ![Daily macro and micronutrient intake compared with personal targets](docs/screenshots/nutrition-dashboard.png)
-
-![Meal details](docs/screenshots/meal-nutrition-detail.png)
 
 ![Observed daily heart-rate rhythm with a fitted 24-hour cosinor model](docs/screenshots/circadian-analytics.png)
 
