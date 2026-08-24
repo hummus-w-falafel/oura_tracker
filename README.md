@@ -6,6 +6,22 @@ It pulls everything Oura's API exposes — sleep, readiness, activity, HR, HRV, 
 
 The whole thing is designed to be driven by a coding agent. `CLAUDE.md` is tuned for Claude Code; `AGENTS.md` is the Codex-facing equivalent. The agent logs your meals, runs your queries, surfaces patterns. If you have any questions or want to make any changes just ask the agent!
 
+## Screenshots
+
+### Nutrition dashboard
+
+![Daily macro and micronutrient intake compared with personal targets](docs/screenshots/nutrition-dashboard.png)
+
+<p align="center">
+  <img src="docs/screenshots/leveling-dashboard.png" width="58%" alt="Health RPG level and stat dashboard">
+  <img src="docs/screenshots/meal-nutrition-detail.png" width="36%" alt="Meal-level macro, mineral, and vitamin breakdown">
+</p>
+<p align="center"><sub>Health RPG progression and meal-level nutrition detail</sub></p>
+
+### Advanced analytics
+
+![Observed daily heart-rate rhythm with a fitted 24-hour cosinor model](docs/screenshots/circadian-analytics.png)
+
 ## What's in the box
 
 - **Full Oura API sync** with incremental updates and idempotent upserts
