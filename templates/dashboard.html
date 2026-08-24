@@ -195,6 +195,16 @@ function hrChart(data, viewMin, viewMax) {
       label:{ text:s.type, borderColor:'transparent',
               style:{color:'#ec4899',background:'transparent',fontSize:'10px'} }
     })),
+    ...(data.travel||[]).map(t => ({
+      x: new Date(t.start).getTime(),
+      x2: t.end ? new Date(t.end).getTime() : undefined,
+      borderColor:'#38bdf860',
+      fillColor:'#38bdf8',
+      opacity:.08,
+      strokeDashArray:5,
+      label:{ text:t.travel_type, borderColor:'transparent',
+              style:{color:'#38bdf8',background:'transparent',fontSize:'10px'} }
+    })),
   ]
 
   // Build meal tooltip HTML for the floating tip

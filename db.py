@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from time_utils import ensure_tz, local_day, local_tz, now_local
+from time_utils import ensure_tz, event_local_day, local_day, local_tz, now_local
 
 LOCAL_TZ = local_tz()
 
@@ -322,6 +322,24 @@ def init_db():
             created_at  TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_sex_logged_at ON sex(logged_at);
+
+        -- ── Travel tracking ──────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS travel (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            day                   TEXT NOT NULL,
+            start_datetime        TEXT NOT NULL,
+            end_datetime          TEXT,
+            travel_type           TEXT NOT NULL,
+            origin                TEXT,
+            destination           TEXT,
+            hours                 REAL,
+            timezone_shift_hours  REAL,
+            direction             TEXT,
+            notes                 TEXT,
+            created_at            TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_travel_day ON travel(day);
+        CREATE INDEX IF NOT EXISTS idx_travel_start ON travel(start_datetime);
 
         -- ── Withings body composition sync ────────────────────────────────
         CREATE TABLE IF NOT EXISTS withings_sync_state (
@@ -939,6 +957,30 @@ def log_sex(logged_at: str, type: str, duration_min: int = None, notes: str = No
             (logged_at, type, duration_min, notes)
         )
     print(f"Logged: {type} at {logged_at}")
+
+
+def log_travel(start_datetime: str, end_datetime: str = None,
+               travel_type: str = "flight", origin: str = None, destination: str = None,
+               hours: float = None, timezone_shift_hours: float = None,
+               direction: str = None, notes: str = None):
+    """Log a travel event such as a flight, drive, train, or bus segment."""
+    start_datetime = _ensure_tz(start_datetime)
+    if end_datetime:
+        end_datetime = _ensure_tz(end_datetime)
+    day = event_local_day(start_datetime)
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO travel "
+            "(day, start_datetime, end_datetime, travel_type, origin, destination, hours, "
+            "timezone_shift_hours, direction, notes) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (day, start_datetime, end_datetime, travel_type, origin, destination, hours,
+             timezone_shift_hours, direction, notes)
+        )
+        travel_id = cur.lastrowid
+    label = f"{origin or ''} -> {destination or ''}".strip()
+    print(f"Logged travel: {travel_type} on {day}" + (f" — {label}" if label else ""))
+    return travel_id
 
 
 def log_journal(day: str, note: str, category: str = "general"):

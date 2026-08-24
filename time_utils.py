@@ -35,3 +35,16 @@ def local_day(value: str | None = None) -> str:
     """Return the configured-local date for a timestamp or current local time."""
     dt = parse_timestamp(value) if value else datetime.now(local_tz())
     return dt.astimezone(local_tz()).date().isoformat()
+
+
+def event_local_day(value: str | None = None) -> str:
+    """
+    Return the date in the timestamp's own timezone.
+
+    This is useful for manual logs entered while traveling. If a timestamp is
+    stored as 2026-06-14T22:30:00-07:00, the user's intended event day is usually
+    2026-06-14 even when their configured home timezone is America/Toronto.
+    Naive timestamps still assume the configured local timezone.
+    """
+    dt = parse_timestamp(value) if value else datetime.now(local_tz())
+    return dt.date().isoformat()

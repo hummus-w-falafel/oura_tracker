@@ -13,6 +13,7 @@ app = Flask(__name__)
 TZ  = ZoneInfo(os.environ.get("TIMEZONE", "America/Toronto"))
 UTC = ZoneInfo("UTC")
 DISPLAY_NAME = os.environ.get("DISPLAY_NAME", "User")
+BIG_TIMEZONE_SHIFT_HOURS = 6
 BODY_COMP_FIELDS = [
     "weight_kg", "fat_free_mass_kg", "fat_ratio_pct", "fat_mass_kg",
     "muscle_mass_kg", "muscle_pct", "hydration_kg", "water_pct",
@@ -31,6 +32,10 @@ def day_utc(date_str):
 def parse_dt(s):
     s = re.sub(r'\.\d+', '', s).replace('Z', '+00:00')
     return datetime.fromisoformat(s)
+
+
+def day_offset(day, offset):
+    return (Date.fromisoformat(day) + timedelta(days=offset)).isoformat()
 
 
 def latest_body_composition_by_day(since: str = None):
@@ -132,6 +137,13 @@ def continuous(days):
         (since,)
     )
 
+    travel = q(
+        "SELECT travel_type, origin, destination, hours, timezone_shift_hours, direction,"
+        " start_datetime AS start, end_datetime AS end, notes"
+        " FROM travel WHERE day > ? ORDER BY start_datetime",
+        (since,)
+    )
+
     # Midnight boundary markers
     d = Date.fromisoformat(since)
     today = datetime.now(TZ).date()
@@ -175,6 +187,7 @@ def continuous(days):
         "meals":        meals,
         "substances":   substances,
         "sex":          sex,
+        "travel":       travel,
         "boundaries":   boundaries,
         "sleep_scores": sleep_scores,
         "today":        today_str,
@@ -465,8 +478,16 @@ def build_daily_feature_matrix():
             "total_amount": r["total_amount"], "active_dose": r["active_dose"],
         }
 
+    travel_by_day = {r["day"]: r for r in q(
+        "SELECT day, COUNT(*) AS travel_count,"
+        " SUM(hours) AS travel_hours,"
+        " SUM(CASE WHEN travel_type = 'flight' THEN hours ELSE 0 END) AS flight_hours,"
+        " MAX(ABS(timezone_shift_hours)) AS timezone_shift_abs"
+        " FROM travel GROUP BY day"
+    )}
+
     all_days = sorted(set(
-        set(sleep) | set(sleep_scores) | set(readiness) | set(activity) | set(body_comp)
+        set(sleep) | set(sleep_scores) | set(readiness) | set(activity) | set(body_comp) | set(travel_by_day)
     ))
 
     features = [
@@ -486,7 +507,14 @@ def build_daily_feature_matrix():
         "weed_count", "weed_g", "thc_mg",
         "nicotine_count", "nicotine_mg",
         "alcohol_count", "alcohol_ml", "pure_alcohol_ml",
+        "travel_count", "travel_hours", "flight_hours", "timezone_shift_abs",
+        "big_timezone_shift",
+        "travel_yesterday", "travel_hours_yesterday", "flight_hours_yesterday",
+        "timezone_shift_abs_yesterday", "big_timezone_shift_yesterday",
+        "days_since_travel", "post_travel_1_3d",
     ]
+
+    travel_days = sorted(day for day, values in travel_by_day.items() if (values.get("travel_count") or 0) > 0)
 
     rows = []
     for day in all_days:
@@ -500,6 +528,7 @@ def build_daily_feature_matrix():
         ws = sets_by_day.get(day, {})
         sb = subs_by_day.get(day, {})
         bc = body_comp.get(day, {})
+        tr = travel_by_day.get(day, {})
 
         row["sleep_score"] = sleep_scores.get(day)
         row["readiness_score"] = r_data.get("score") if isinstance(r_data, dict) else None
@@ -577,6 +606,34 @@ def build_daily_feature_matrix():
         row["alcohol_count"] = alc.get("count", 0)
         row["alcohol_ml"] = alc.get("total_amount") or 0
         row["pure_alcohol_ml"] = round(alc["active_dose"], 1) if alc.get("active_dose") else 0
+        row["travel_count"] = tr.get("travel_count") or 0
+        row["travel_hours"] = tr.get("travel_hours") or 0
+        row["flight_hours"] = tr.get("flight_hours") or 0
+        row["timezone_shift_abs"] = tr.get("timezone_shift_abs") or 0
+        row["big_timezone_shift"] = 1 if row["timezone_shift_abs"] >= BIG_TIMEZONE_SHIFT_HOURS else 0
+
+        prev_tr = travel_by_day.get(day_offset(day, -1), {})
+        row["travel_yesterday"] = 1 if (prev_tr.get("travel_count") or 0) > 0 else 0
+        row["travel_hours_yesterday"] = prev_tr.get("travel_hours") or 0
+        row["flight_hours_yesterday"] = prev_tr.get("flight_hours") or 0
+        row["timezone_shift_abs_yesterday"] = prev_tr.get("timezone_shift_abs") or 0
+        row["big_timezone_shift_yesterday"] = (
+            1 if row["timezone_shift_abs_yesterday"] >= BIG_TIMEZONE_SHIFT_HOURS else 0
+        )
+
+        last_travel_day = None
+        for travel_day in travel_days:
+            if travel_day < day:
+                last_travel_day = travel_day
+            else:
+                break
+        if last_travel_day:
+            days_since = (Date.fromisoformat(day) - Date.fromisoformat(last_travel_day)).days
+            row["days_since_travel"] = days_since
+            row["post_travel_1_3d"] = 1 if 1 <= days_since <= 3 else 0
+        else:
+            row["days_since_travel"] = None
+            row["post_travel_1_3d"] = 0
 
         rows.append(row)
 

@@ -2,7 +2,7 @@
 
 A self-hosted health analytics platform for the [Oura Ring](https://ouraring.com/) and Withings scale data, built to be operated by an AI agent.
 
-It pulls everything Oura's API exposes — sleep, readiness, activity, HR, HRV, SpO2, workouts, sessions, vO2 max, vascular age — plus Withings Body Comp measurements into a local SQLite database, augments it with custom logging, and serves it through a Flask dashboard.
+It pulls everything Oura's API exposes — sleep, readiness, activity, HR, HRV, SpO2, workouts, sessions, vO2 max, vascular age — plus Withings Body Comp measurements into a local SQLite database, augments it with custom logging for meals, workouts, substances, travel, and journal entries, and serves it through a Flask dashboard.
 
 The whole thing is designed to be driven by a coding agent. `CLAUDE.md` is tuned for Claude Code; `AGENTS.md` is the Codex-facing equivalent. The agent logs your meals, runs your queries, surfaces patterns. If you have any questions or want to make any changes just ask the agent!
 
@@ -15,6 +15,7 @@ The whole thing is designed to be driven by a coding agent. `CLAUDE.md` is tuned
 - **Custom nutrition scoring** — sigmoid/gaussian curves over macros + micros (AHEI-2010 inspired)
 - **Solo Leveling RPG layer** — VIT/STR/END/NUT/DIS stats, XP, levels, ranks (see `LEVELING.md`)
 - **Correlation engine** — Pearson + normalized mutual information across ~30 daily features, with same-day and next-day lag
+- **Travel-aware analysis** — flight hours and time-zone shifts can be compared against later sleep and recovery
 - **Agent-first design** — `CLAUDE.md` and `AGENTS.md` are operating prompts; every script is structured for programmatic use
 
 ## Setup

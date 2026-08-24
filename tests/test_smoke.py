@@ -48,6 +48,7 @@ class SmokeTests(unittest.TestCase):
         self.assertIn("meals", tables)
         self.assertIn("meal_items", tables)
         self.assertIn("workout_sets", tables)
+        self.assertIn("travel", tables)
         self.assertIn("withings_measure_groups", tables)
         self.assertIn("withings_measure_items", tables)
         self.assertIn("withings_body_composition", tables)
@@ -65,13 +66,45 @@ class SmokeTests(unittest.TestCase):
         )
         self.db.log_substance("2026-04-25T18:00:00-04:00", "caffeine", 100, "mg", None, "coffee")
         self.db.log_sex("2026-04-25T23:00:00-04:00", "sex", 20)
+        self.db.log_travel(
+            start_datetime="2026-04-25T20:00:00-04:00",
+            end_datetime="2026-04-25T21:30:00-04:00",
+            travel_type="flight",
+            origin="Toronto",
+            destination="New York",
+            hours=1.5,
+            timezone_shift_hours=0,
+            direction="none",
+            notes="test flight",
+        )
         self.db.log_journal("2026-04-25", "test note", "general")
 
         with self.db.get_conn() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM meals").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM substances").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM sex").fetchone()[0], 1)
+            travel = conn.execute("SELECT day, travel_type, hours FROM travel").fetchone()
+            self.assertEqual(travel["day"], "2026-04-25")
+            self.assertEqual(travel["travel_type"], "flight")
+            self.assertEqual(travel["hours"], 1.5)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM journal").fetchone()[0], 1)
+
+    def test_travel_day_uses_event_timezone_not_home_timezone(self):
+        self.db.log_travel(
+            start_datetime="2026-07-02T00:30:00+09:00",
+            end_datetime="2026-07-02T02:30:00+09:00",
+            travel_type="flight",
+            origin="Tokyo",
+            destination="Seoul",
+            hours=2,
+            timezone_shift_hours=0,
+            direction="west",
+        )
+
+        with self.db.get_conn() as conn:
+            travel = conn.execute("SELECT day FROM travel").fetchone()
+
+        self.assertEqual(travel["day"], "2026-07-02")
 
     def test_withings_measure_group_flattens_body_composition(self):
         record = {
@@ -353,6 +386,60 @@ targets:
         self.assertIn("counts", payload)
         self.assertIn("nicotine_count", payload["features"])
         self.assertIn("nicotine_mg", payload["features"])
+        self.assertIn("flight_hours", payload["features"])
+        self.assertIn("timezone_shift_abs", payload["features"])
+        self.assertIn("big_timezone_shift", payload["features"])
+        self.assertIn("flight_hours_yesterday", payload["features"])
+        self.assertIn("big_timezone_shift_yesterday", payload["features"])
+        self.assertIn("post_travel_1_3d", payload["features"])
+
+    def test_daily_feature_matrix_derives_travel_recovery_features(self):
+        with self.db.get_conn() as conn:
+            for idx, day in enumerate(["2026-04-25", "2026-04-26", "2026-04-27", "2026-04-28"]):
+                conn.execute("INSERT INTO daily_sleep (day, score) VALUES (?, ?)", (day, 70 + idx))
+                conn.execute(
+                    "INSERT INTO sleep_periods (id, day, type, total_sleep_duration, average_hrv, lowest_heart_rate) VALUES (?, ?, ?, ?, ?, ?)",
+                    (f"travel-s{idx}", day, "long_sleep", 25200, 50 + idx, 55 - idx),
+                )
+            conn.execute(
+                "INSERT INTO travel "
+                "(day, start_datetime, end_datetime, travel_type, origin, destination, hours, timezone_shift_hours, direction) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("2026-04-25", "2026-04-25T08:00:00-04:00", "2026-04-25T11:00:00-04:00",
+                 "flight", "Toronto", "London", 2.5, 6, "east"),
+            )
+
+        days, features, rows = self.dashboard.build_daily_feature_matrix()
+        by_day = {day: row for day, row in zip(days, rows)}
+        self.assertEqual(by_day["2026-04-25"]["flight_hours"], 2.5)
+        self.assertEqual(by_day["2026-04-25"]["big_timezone_shift"], 1)
+        self.assertEqual(by_day["2026-04-26"]["travel_yesterday"], 1)
+        self.assertEqual(by_day["2026-04-26"]["flight_hours_yesterday"], 2.5)
+        self.assertEqual(by_day["2026-04-26"]["timezone_shift_abs_yesterday"], 6)
+        self.assertEqual(by_day["2026-04-26"]["big_timezone_shift_yesterday"], 1)
+        self.assertEqual(by_day["2026-04-26"]["days_since_travel"], 1)
+        self.assertEqual(by_day["2026-04-28"]["days_since_travel"], 3)
+        self.assertEqual(by_day["2026-04-28"]["post_travel_1_3d"], 1)
+
+    def test_dashboard_continuous_api_includes_travel(self):
+        today = date.today().isoformat()
+        self.db.log_travel(
+            start_datetime=f"{today}T08:00:00-04:00",
+            end_datetime=f"{today}T10:30:00-04:00",
+            travel_type="flight",
+            origin="Toronto",
+            destination="Chicago",
+            hours=2.5,
+            timezone_shift_hours=-1,
+            direction="west",
+        )
+
+        client = self.dashboard.app.test_client()
+        response = client.get("/api/continuous/7")
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data)
+        self.assertEqual(payload["travel"][0]["travel_type"], "flight")
+        self.assertEqual(payload["travel"][0]["hours"], 2.5)
 
     def test_dashboard_granger_api_smoke(self):
         with self.db.get_conn() as conn:
