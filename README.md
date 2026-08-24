@@ -24,8 +24,8 @@ Prerequisites: Python 3.11+, an Oura developer app, a free USDA API key. Withing
 
 ```bash
 # 1. Clone
-git clone <your-fork-url> h_tracker
-cd h_tracker
+git clone <your-fork-url> oura_tracker
+cd oura_tracker
 
 # 2. Install dependencies
 python3 -m venv .venv
