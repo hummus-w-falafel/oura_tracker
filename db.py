@@ -323,6 +323,60 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_sex_logged_at ON sex(logged_at);
 
+        -- ── Withings body composition sync ────────────────────────────────
+        CREATE TABLE IF NOT EXISTS withings_sync_state (
+            endpoint          TEXT PRIMARY KEY,
+            last_synced_at    TEXT,
+            last_update_unix  INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS withings_measure_groups (
+            grpid             INTEGER PRIMARY KEY,
+            measured_at       TEXT NOT NULL,
+            day               TEXT NOT NULL,
+            created_at_api    TEXT,
+            modified_at_api   TEXT,
+            attrib            INTEGER,
+            category          INTEGER,
+            deviceid          TEXT,
+            model             TEXT,
+            raw_json          TEXT,
+            synced_at         TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_withings_measure_groups_day ON withings_measure_groups(day);
+        CREATE INDEX IF NOT EXISTS idx_withings_measure_groups_measured_at ON withings_measure_groups(measured_at);
+
+        CREATE TABLE IF NOT EXISTS withings_measure_items (
+            grpid             INTEGER NOT NULL REFERENCES withings_measure_groups(grpid) ON DELETE CASCADE,
+            measure_type      INTEGER NOT NULL,
+            value_raw         INTEGER,
+            unit              INTEGER,
+            value             REAL,
+            algo              INTEGER,
+            fw                INTEGER,
+            PRIMARY KEY (grpid, measure_type)
+        );
+
+        CREATE TABLE IF NOT EXISTS withings_body_composition (
+            grpid                   INTEGER PRIMARY KEY REFERENCES withings_measure_groups(grpid) ON DELETE CASCADE,
+            measured_at             TEXT NOT NULL,
+            day                     TEXT NOT NULL,
+            weight_kg               REAL,
+            fat_free_mass_kg        REAL,
+            fat_ratio_pct           REAL,
+            fat_mass_kg             REAL,
+            muscle_mass_kg          REAL,
+            muscle_pct              REAL,
+            hydration_kg            REAL,
+            water_pct               REAL,
+            bone_mass_kg            REAL,
+            pulse_wave_velocity_ms  REAL,
+            raw_json                TEXT,
+            synced_at               TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_withings_body_composition_day ON withings_body_composition(day);
+        CREATE INDEX IF NOT EXISTS idx_withings_body_composition_measured_at ON withings_body_composition(measured_at);
+
         -- ── Manual notes / journal entries ──────────────────────────────────
         CREATE TABLE IF NOT EXISTS journal (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -624,6 +678,106 @@ def upsert_sleep_time(conn, record: dict):
     ))
 
 
+WITHINGS_MEASURE_TYPES = {
+    1: "weight_kg",
+    5: "fat_free_mass_kg",
+    6: "fat_ratio_pct",
+    8: "fat_mass_kg",
+    76: "muscle_mass_kg",
+    77: "hydration_kg",
+    88: "bone_mass_kg",
+    91: "pulse_wave_velocity_ms",
+}
+
+
+def withings_value(measure: dict):
+    """Convert a Withings raw measure value using value * 10^unit."""
+    raw = measure.get("value")
+    unit = measure.get("unit")
+    if raw is None or unit is None:
+        return None
+    return float(raw) * (10 ** int(unit))
+
+
+def _unix_to_utc_iso(value):
+    if value is None:
+        return None
+    return datetime.utcfromtimestamp(int(value)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def upsert_withings_measure_group(conn, record: dict):
+    """Store raw Withings group/items and flattened Body Comp metrics."""
+    grpid = record["grpid"]
+    measured_at = _unix_to_utc_iso(record.get("date"))
+    day = local_day(measured_at)
+    synced_at = NOW()
+    conn.execute("""
+        INSERT INTO withings_measure_groups
+        (grpid, measured_at, day, created_at_api, modified_at_api, attrib, category,
+         deviceid, model, raw_json, synced_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(grpid) DO UPDATE SET
+            measured_at=excluded.measured_at, day=excluded.day,
+            created_at_api=excluded.created_at_api, modified_at_api=excluded.modified_at_api,
+            attrib=excluded.attrib, category=excluded.category, deviceid=excluded.deviceid,
+            model=excluded.model, raw_json=excluded.raw_json, synced_at=excluded.synced_at
+    """, (
+        grpid, measured_at, day,
+        _unix_to_utc_iso(record.get("created")),
+        _unix_to_utc_iso(record.get("modified")),
+        record.get("attrib"), record.get("category"),
+        record.get("deviceid"), record.get("model"),
+        json.dumps(record), synced_at,
+    ))
+
+    values = {}
+    for measure in record.get("measures", []):
+        measure_type = measure.get("type")
+        converted = withings_value(measure)
+        conn.execute("""
+            INSERT INTO withings_measure_items
+            (grpid, measure_type, value_raw, unit, value, algo, fw)
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(grpid, measure_type) DO UPDATE SET
+                value_raw=excluded.value_raw, unit=excluded.unit, value=excluded.value,
+                algo=excluded.algo, fw=excluded.fw
+        """, (
+            grpid, measure_type, measure.get("value"), measure.get("unit"), converted,
+            measure.get("algo"), measure.get("fw"),
+        ))
+        if measure_type in WITHINGS_MEASURE_TYPES:
+            values[WITHINGS_MEASURE_TYPES[measure_type]] = converted
+
+    weight = values.get("weight_kg")
+    muscle = values.get("muscle_mass_kg")
+    hydration = values.get("hydration_kg")
+    muscle_pct = round(muscle * 100 / weight, 2) if weight and muscle is not None else None
+    water_pct = round(hydration * 100 / weight, 2) if weight and hydration is not None else None
+
+    conn.execute("""
+        INSERT INTO withings_body_composition
+        (grpid, measured_at, day, weight_kg, fat_free_mass_kg, fat_ratio_pct,
+         fat_mass_kg, muscle_mass_kg, muscle_pct, hydration_kg, water_pct,
+         bone_mass_kg, pulse_wave_velocity_ms, raw_json, synced_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(grpid) DO UPDATE SET
+            measured_at=excluded.measured_at, day=excluded.day,
+            weight_kg=excluded.weight_kg, fat_free_mass_kg=excluded.fat_free_mass_kg,
+            fat_ratio_pct=excluded.fat_ratio_pct, fat_mass_kg=excluded.fat_mass_kg,
+            muscle_mass_kg=excluded.muscle_mass_kg, muscle_pct=excluded.muscle_pct,
+            hydration_kg=excluded.hydration_kg, water_pct=excluded.water_pct,
+            bone_mass_kg=excluded.bone_mass_kg,
+            pulse_wave_velocity_ms=excluded.pulse_wave_velocity_ms,
+            raw_json=excluded.raw_json, synced_at=excluded.synced_at
+    """, (
+        grpid, measured_at, day,
+        values.get("weight_kg"), values.get("fat_free_mass_kg"), values.get("fat_ratio_pct"),
+        values.get("fat_mass_kg"), values.get("muscle_mass_kg"), muscle_pct,
+        values.get("hydration_kg"), water_pct, values.get("bone_mass_kg"),
+        values.get("pulse_wave_velocity_ms"), json.dumps(record), synced_at,
+    ))
+
+
 def _ensure_tz(ts: str) -> str:
     """Ensure a timestamp string has a timezone offset. Assumes LOCAL_TZ if missing."""
     return ensure_tz(ts)
@@ -865,6 +1019,24 @@ def set_sync_state(conn, endpoint: str, synced_at: str):
     conn.execute(
         "INSERT INTO sync_state VALUES (?,?) ON CONFLICT(endpoint) DO UPDATE SET last_synced_at=excluded.last_synced_at",
         (endpoint, synced_at)
+    )
+
+
+def get_withings_sync_state(endpoint: str):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT last_synced_at, last_update_unix FROM withings_sync_state WHERE endpoint=?",
+            (endpoint,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def set_withings_sync_state(conn, endpoint: str, synced_at: str, last_update_unix: int):
+    conn.execute(
+        "INSERT INTO withings_sync_state (endpoint, last_synced_at, last_update_unix) VALUES (?,?,?) "
+        "ON CONFLICT(endpoint) DO UPDATE SET "
+        "last_synced_at=excluded.last_synced_at, last_update_unix=excluded.last_update_unix",
+        (endpoint, synced_at, last_update_unix),
     )
 
 

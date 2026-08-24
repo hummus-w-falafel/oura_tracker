@@ -42,6 +42,7 @@
 <div class="panel"><div class="plbl">Sleep HRV</div><div class="scroll-wrap" id="scroll-hrv"><div id="ch-hrv"></div></div></div>
 <div class="panel"><div class="plbl" style="display:flex;justify-content:space-between;align-items:center">Macros vs Targets<button class="toggle-btn" id="macro-toggle" onclick="toggleNutView('macro')">Summary</button></div><div id="ch-macro"></div></div>
 <div class="panel"><div class="plbl" style="display:flex;justify-content:space-between;align-items:center">Micronutrients vs Targets<button class="toggle-btn" id="micro-toggle" onclick="toggleNutView('micro')">Summary</button></div><div id="ch-micro"></div></div>
+<div class="panel"><div class="plbl">Body Composition</div><div id="ch-body"></div></div>
 <div class="panel">
   <div class="plbl" style="display:flex;justify-content:space-between;align-items:center">
     Strength Training
@@ -652,6 +653,86 @@ function microChart(data) {
   ], 220)
 }
 
+async function bodyCompositionChart(n) {
+  const {body_composition: rows} = await fetch('/api/body-composition/'+n).then(r=>r.json())
+  if (!rows.length) {
+    draw('ch-body', { ...BASE, chart:{...BASE.chart,type:'line',height:240}, series:[], noData:{text:'No Withings data'} })
+    return
+  }
+
+  const otherPct = r => {
+    const known = (r.fat_ratio_pct || 0) + (r.muscle_pct || 0)
+    return Math.max(0, Math.round((100 - known) * 100) / 100)
+  }
+  const labels = rows.map(r => chartDateLabel(r.day))
+  const series = [
+    { name:'Fat', type:'bar', color:'#fbbf24', data: rows.map(r=>r.fat_ratio_pct) },
+    { name:'Muscle', type:'bar', color:'#22c55e', data: rows.map(r=>r.muscle_pct) },
+    { name:'Other', type:'bar', color:'#334155', data: rows.map(otherPct) },
+    { name:'Weight', type:'line', color:'#38bdf8', data: rows.map(r=>r.weight_kg) },
+  ]
+
+  const kgVals = rows.map(r=>r.weight_kg).filter(v=>v!=null)
+  const kgPad = kgVals.length ? Math.max(1, (Math.max(...kgVals) - Math.min(...kgVals)) * .25) : 1
+  const kgMin = kgVals.length ? Math.floor((Math.min(...kgVals) - kgPad) * 10) / 10 : undefined
+  const kgMax = kgVals.length ? Math.ceil((Math.max(...kgVals) + kgPad) * 10) / 10 : undefined
+  const fmt = (v, unit) => v == null ? 'n/a' : `${Number(v).toFixed(v < 10 ? 2 : 1)}${unit}`
+  const compAxis = seriesName => ({
+    seriesName,
+    min:0,
+    max:100,
+    show:seriesName === 'Fat',
+    tickAmount:4,
+    decimalsInFloat:0,
+    labels:{style:{colors:'#94a3b8',fontSize:'10px'},formatter:v=>Math.round(v)+'%'},
+    title:seriesName === 'Fat' ? {text:'%',style:{color:'#94a3b8',fontSize:'10px'}} : undefined,
+  })
+
+  draw('ch-body', { ...BASE,
+    chart:{...BASE.chart,type:'line',height:280,stacked:true,toolbar:{show:false},zoom:{enabled:false},selection:{enabled:false}},
+    series,
+    plotOptions:{bar:{columnWidth:'46%',borderRadius:2}},
+    stroke:{width:[0,0,0,2.8],curve:'smooth'},
+    markers:{size:[0,0,0,5],strokeWidth:0,hover:{size:7}},
+    dataLabels:{enabled:false},
+    xaxis:{type:'category',categories:labels,labels:{style:{colors:'#475569',fontSize:'11px'}}},
+    yaxis:[
+      compAxis('Fat'),
+      compAxis('Muscle'),
+      compAxis('Other'),
+      {
+        seriesName:'Weight',
+        opposite:true,
+        min:kgMin,
+        max:kgMax,
+        tickAmount:4,
+        decimalsInFloat:1,
+        labels:{style:{colors:'#38bdf8',fontSize:'10px'},formatter:v=>v.toFixed(1)},
+        title:{text:'kg',style:{color:'#38bdf8',fontSize:'10px'}},
+      },
+    ],
+    legend:{...LEGEND,fontSize:'10px'},
+    tooltip:{theme:'dark',shared:false,intersect:true,
+      custom({dataPointIndex}) {
+        const m = rows[dataPointIndex]
+        if (!m) return ''
+        const t = m.measured_at ? new Date(m.measured_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : m.day
+        return `<div style="padding:10px 14px;font-size:11px;line-height:1.7;min-width:220px">
+          <div style="color:#e2e8f0;font-weight:600;margin-bottom:4px">${m.day} · ${t}</div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">Weight</span><b style="color:#38bdf8">${fmt(m.weight_kg,' kg')}</b></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">Fat</span><b style="color:#fbbf24">${fmt(m.fat_ratio_pct,'%')}</b></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">Fat Mass</span><span>${fmt(m.fat_mass_kg,' kg')}</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">Muscle</span><b style="color:#22c55e">${fmt(m.muscle_pct,'%')}</b></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">Muscle Mass</span><span>${fmt(m.muscle_mass_kg,' kg')}</span></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">Water</span><b style="color:#60a5fa">${fmt(m.water_pct,'%')}</b></div>
+          <div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">Bone Mass</span><span>${fmt(m.bone_mass_kg,' kg')}</span></div>
+          ${m.pulse_wave_velocity_ms == null ? '' : `<div style="display:flex;justify-content:space-between;gap:16px"><span style="color:#94a3b8">PWV</span><span>${fmt(m.pulse_wave_velocity_ms,' m/s')}</span></div>`}
+        </div>`
+      }
+    },
+  })
+}
+
 const STRENGTH_COLORS = ['#fbbf24','#22c55e','#a78bfa','#38bdf8','#f87171','#e2e8f0','#fb923c']
 let STRENGTH_DATA = null
 let strengthView = 'weekly'
@@ -868,6 +949,7 @@ async function load(n) {
   ;[7,14,30].forEach(d => $('b'+d).classList.toggle('on', d===n))
   const [data] = await Promise.all([
     fetch('/api/continuous/'+n).then(r=>r.json()),
+    bodyCompositionChart(n),
     strengthChart(n),
     scoresChart(n),
     bedtimeChart(n),

@@ -1,6 +1,7 @@
 # Secrets and tokens
 .env
 tokens.json
+withings_tokens.json
 
 # Personal user profile (CLAUDE.md references PROFILE.md)
 PROFILE.md

@@ -13,6 +13,11 @@ app = Flask(__name__)
 TZ  = ZoneInfo(os.environ.get("TIMEZONE", "America/Toronto"))
 UTC = ZoneInfo("UTC")
 DISPLAY_NAME = os.environ.get("DISPLAY_NAME", "User")
+BODY_COMP_FIELDS = [
+    "weight_kg", "fat_free_mass_kg", "fat_ratio_pct", "fat_mass_kg",
+    "muscle_mass_kg", "muscle_pct", "hydration_kg", "water_pct",
+    "bone_mass_kg", "pulse_wave_velocity_ms",
+]
 
 def q(sql, params=()):
     with get_conn() as con:
@@ -26,6 +31,22 @@ def day_utc(date_str):
 def parse_dt(s):
     s = re.sub(r'\.\d+', '', s).replace('Z', '+00:00')
     return datetime.fromisoformat(s)
+
+
+def latest_body_composition_by_day(since: str = None):
+    where = " WHERE day > ?" if since else ""
+    params = (since,) if since else ()
+    rows = q(
+        "SELECT day, measured_at, " + ", ".join(BODY_COMP_FIELDS) +
+        " FROM withings_body_composition" +
+        where +
+        " ORDER BY day, measured_at",
+        params,
+    )
+    latest = {}
+    for row in rows:
+        latest[row["day"]] = row
+    return latest
 
 def sleep_runs(since):
     """Parse all sleep nights since a date into stage runs."""
@@ -214,6 +235,24 @@ def scores(days):
     } for d in all_days]})
 
 
+@app.route("/api/body-composition/<int:days>")
+def body_composition(days):
+    since = (datetime.now(TZ) - timedelta(days=days)).strftime("%Y-%m-%d")
+    by_day = latest_body_composition_by_day(since)
+
+    def rounded(row, digits=2):
+        return {
+            "day": row["day"],
+            "measured_at": row["measured_at"],
+            **{
+                field: round(row[field], digits) if row[field] is not None else None
+                for field in BODY_COMP_FIELDS
+            },
+        }
+
+    return jsonify({"body_composition": [rounded(by_day[d]) for d in sorted(by_day)]})
+
+
 @app.route("/api/strength/<int:days>")
 def strength(days):
     today = datetime.now(TZ).date()
@@ -364,6 +403,7 @@ def build_daily_feature_matrix():
     cardio_age = {r["day"]: r["vascular_age"] for r in q(
         "SELECT day, vascular_age FROM daily_cardiovascular_age WHERE vascular_age IS NOT NULL"
     )}
+    body_comp = latest_body_composition_by_day()
 
     meals_by_day = {}
     meal_timing = {}
@@ -426,7 +466,7 @@ def build_daily_feature_matrix():
         }
 
     all_days = sorted(set(
-        set(sleep) | set(sleep_scores) | set(readiness) | set(activity)
+        set(sleep) | set(sleep_scores) | set(readiness) | set(activity) | set(body_comp)
     ))
 
     features = [
@@ -437,6 +477,7 @@ def build_daily_feature_matrix():
         "bedtime_hour", "temp_deviation",
         "steps", "active_cal", "sedentary_hrs",
         "spo2", "vascular_age",
+        *BODY_COMP_FIELDS,
         "calories", "protein_g", "carbs_g", "fat_g", "fiber_g", "sugar_g", "sat_fat_g",
         "sodium_mg", "potassium_mg", "magnesium_mg",
         "meal_count", "first_meal_hour", "last_meal_hour", "eating_window_hours",
@@ -458,6 +499,7 @@ def build_daily_feature_matrix():
         w = workouts_by_day.get(day, {})
         ws = sets_by_day.get(day, {})
         sb = subs_by_day.get(day, {})
+        bc = body_comp.get(day, {})
 
         row["sleep_score"] = sleep_scores.get(day)
         row["readiness_score"] = r_data.get("score") if isinstance(r_data, dict) else None
@@ -489,6 +531,8 @@ def build_daily_feature_matrix():
         row["sedentary_hrs"] = round(a["sedentary_time"] / 3600, 1) if isinstance(a, dict) and a.get("sedentary_time") else None
         row["spo2"] = spo2.get(day)
         row["vascular_age"] = cardio_age.get(day)
+        for field in BODY_COMP_FIELDS:
+            row[field] = bc.get(field)
         row["calories"] = m.get("cal")
         row["protein_g"] = m.get("protein")
         row["carbs_g"] = m.get("carbs")

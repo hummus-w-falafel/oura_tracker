@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,21 +16,30 @@ class SmokeTests(unittest.TestCase):
         os.environ["HEALTH_DB_PATH"] = str(self.db_path)
         os.environ["PROFILE_PATH"] = str(self.profile_path)
         os.environ["TIMEZONE"] = "America/Toronto"
+        os.environ["WITHINGS_CLIENT_ID"] = "test-client"
+        os.environ["WITHINGS_CLIENT_SECRET"] = "test-secret"
+        os.environ["WITHINGS_REDIRECT_URI"] = "https://example.test/callback"
+        os.environ["WITHINGS_TOKEN_FILE"] = str(Path(self.tmp.name) / "withings_tokens.json")
 
         import db
         import nutrition
         import leveling
         import dashboard
+        import withings_client
 
         self.db = importlib.reload(db)
         self.nutrition = importlib.reload(nutrition)
         self.leveling = importlib.reload(leveling)
         self.dashboard = importlib.reload(dashboard)
+        self.withings_client = importlib.reload(withings_client)
         self.db.init_db()
 
     def tearDown(self):
         self.tmp.cleanup()
-        for key in ("HEALTH_DB_PATH", "PROFILE_PATH"):
+        for key in (
+            "HEALTH_DB_PATH", "PROFILE_PATH", "WITHINGS_CLIENT_ID",
+            "WITHINGS_CLIENT_SECRET", "WITHINGS_REDIRECT_URI", "WITHINGS_TOKEN_FILE",
+        ):
             os.environ.pop(key, None)
 
     def test_init_db_creates_core_tables(self):
@@ -38,6 +48,10 @@ class SmokeTests(unittest.TestCase):
         self.assertIn("meals", tables)
         self.assertIn("meal_items", tables)
         self.assertIn("workout_sets", tables)
+        self.assertIn("withings_measure_groups", tables)
+        self.assertIn("withings_measure_items", tables)
+        self.assertIn("withings_body_composition", tables)
+        self.assertIn("withings_sync_state", tables)
         self.assertIn("leveling_daily_cache", tables)
 
     def test_raw_logging_helpers(self):
@@ -58,6 +72,95 @@ class SmokeTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM substances").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM sex").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM journal").fetchone()[0], 1)
+
+    def test_withings_measure_group_flattens_body_composition(self):
+        record = {
+            "grpid": 123,
+            "date": 1785157200,
+            "created": 1785157201,
+            "modified": 1785157202,
+            "attrib": 0,
+            "category": 1,
+            "deviceid": "scale-1",
+            "model": "Body Comp",
+            "measures": [
+                {"type": 1, "value": 81234, "unit": -3},
+                {"type": 6, "value": 183, "unit": -1},
+                {"type": 8, "value": 14870, "unit": -3},
+                {"type": 76, "value": 62000, "unit": -3},
+                {"type": 77, "value": 45500, "unit": -3},
+                {"type": 88, "value": 3100, "unit": -3},
+                {"type": 999, "value": 42, "unit": 0},
+            ],
+        }
+        with self.db.get_conn() as conn:
+            self.db.upsert_withings_measure_group(conn, record)
+
+        with self.db.get_conn() as conn:
+            body = conn.execute("SELECT * FROM withings_body_composition WHERE grpid = 123").fetchone()
+            unknown = conn.execute(
+                "SELECT value FROM withings_measure_items WHERE grpid = 123 AND measure_type = 999"
+            ).fetchone()
+
+        self.assertAlmostEqual(body["weight_kg"], 81.234)
+        self.assertAlmostEqual(body["fat_ratio_pct"], 18.3)
+        self.assertAlmostEqual(body["fat_mass_kg"], 14.87)
+        self.assertAlmostEqual(body["muscle_mass_kg"], 62.0)
+        self.assertAlmostEqual(body["hydration_kg"], 45.5)
+        self.assertAlmostEqual(body["water_pct"], 56.01)
+        self.assertAlmostEqual(body["muscle_pct"], 76.32)
+        self.assertEqual(unknown["value"], 42)
+
+    def test_withings_signature_and_value_conversion(self):
+        sig = self.withings_client.sign({
+            "action": "getnonce",
+            "client_id": "test-client",
+            "timestamp": 123,
+        })
+        self.assertEqual(
+            sig,
+            "49f78c673aba4bae62f9723ddbd1cc93029f76bba6a32bcc5d0981a92463ba97",
+        )
+        self.assertEqual(self.db.withings_value({"value": 81234, "unit": -3}), 81.234)
+
+    def test_dashboard_body_composition_api_returns_latest_daily_rows(self):
+        today = date.today().isoformat()
+        with self.db.get_conn() as conn:
+            self.db.upsert_withings_measure_group(conn, {
+                "grpid": 200,
+                "date": int(datetime.fromisoformat(today + "T08:00:00+00:00").timestamp()),
+                "measures": [
+                    {"type": 1, "value": 81000, "unit": -3},
+                    {"type": 6, "value": 185, "unit": -1},
+                    {"type": 8, "value": 14985, "unit": -3},
+                    {"type": 76, "value": 61000, "unit": -3},
+                    {"type": 77, "value": 45200, "unit": -3},
+                    {"type": 88, "value": 3100, "unit": -3},
+                ],
+            })
+            self.db.upsert_withings_measure_group(conn, {
+                "grpid": 201,
+                "date": int(datetime.fromisoformat(today + "T20:00:00+00:00").timestamp()),
+                "measures": [
+                    {"type": 1, "value": 80500, "unit": -3},
+                    {"type": 6, "value": 181, "unit": -1},
+                    {"type": 8, "value": 14570, "unit": -3},
+                    {"type": 76, "value": 61200, "unit": -3},
+                    {"type": 77, "value": 45400, "unit": -3},
+                    {"type": 88, "value": 3100, "unit": -3},
+                ],
+            })
+
+        client = self.dashboard.app.test_client()
+        response = client.get("/api/body-composition/7")
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data)
+        self.assertEqual(len(payload["body_composition"]), 1)
+        row = payload["body_composition"][0]
+        self.assertEqual(row["day"], today)
+        self.assertEqual(row["weight_kg"], 80.5)
+        self.assertEqual(row["fat_ratio_pct"], 18.1)
+        self.assertAlmostEqual(row["muscle_pct"], 76.02)
 
     def test_meal_item_logging_rolls_up_parent_totals(self):
         meal_id = self.db.log_meal_with_items(
@@ -269,12 +372,14 @@ targets:
         self.assertIn("results", payload)
 
     def test_dashboard_strength_api_smoke(self):
+        today = date.today().isoformat()
+        week = date.today().strftime("%Y-W%W")
         with self.db.get_conn() as conn:
             conn.execute(
                 "INSERT INTO workouts (id, day, activity, source, start_datetime, end_datetime) VALUES (?,?,?,?,?,?)",
-                ("w1", "2026-04-25", "kettlebell", "manual", "2026-04-25T18:00:00Z", "2026-04-25T18:30:00Z"),
+                ("w1", today, "kettlebell", "manual", f"{today}T18:00:00Z", f"{today}T18:30:00Z"),
             )
-        self.db.log_workout_session("w1", "2026-04-25", [
+        self.db.log_workout_session("w1", today, [
             ("double KB press", 1, 5, 25.0),
             ("double KB press", 2, 6, 25.0),
         ])
@@ -284,8 +389,8 @@ targets:
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.data)
         self.assertEqual(payload["total_sets"], 2)
-        self.assertIn("2026-04-25", payload["days"])
-        self.assertTrue(any(w["week"] == "2026-W16" for w in payload["weeks"]))
+        self.assertIn(today, payload["days"])
+        self.assertTrue(any(w["week"] == week for w in payload["weeks"]))
         self.assertEqual(payload["daily_sets"][0]["exercise"], "double KB press")
         self.assertEqual(payload["daily_sets"][0]["sets"], 2)
         self.assertEqual(payload["daily_sets"][0]["details"][1]["reps"], 6)
