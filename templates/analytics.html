@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Advanced Analytics</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='base.css') }}">
+<script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.2/dist/apexcharts.min.js"></script>
+<style>
+  body{padding:12px 14px;max-width:1280px;margin:0 auto}
+  header{margin-bottom:14px}
+  .toolbar{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:12px}
+  .tabs{display:flex;gap:4px;overflow-x:auto}
+  button,select{background:#131318;border:1px solid #252532;color:#64748b;padding:7px 12px;font:inherit;font-size:.68rem;border-radius:0}
+  button{cursor:pointer}button:hover,button.on,select:focus{color:#e2e8f0;border-color:#475569;outline:none}
+  select{min-width:190px;color:#cbd5e1}
+  .view{display:none}.view.on{display:block}
+  .panel{border:1px solid #1e1e28;padding:14px;margin-bottom:12px}
+  .panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
+  .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:12px}
+  .stat{border:1px solid #1e1e28;background:#101015;padding:10px;min-height:66px}
+  .stat span{display:block;font-size:.55rem;color:#64748b;text-transform:uppercase;letter-spacing:.06em}
+  .stat b{display:block;font-size:1rem;color:#e2e8f0;margin-top:7px;font-weight:500}
+  .stat small{display:block;font-size:.52rem;color:#475569;margin-top:4px}
+  .empty{color:#64748b;font-size:.68rem;padding:28px 8px;text-align:center}
+  .change-list,.result-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px}
+  .change,.result{border:1px solid #1e1e28;background:#101015;padding:10px}
+  .change-title,.result-title{font-size:.68rem;color:#cbd5e1;margin-bottom:7px}
+  .change-meta,.result-meta{font-size:.57rem;color:#64748b;line-height:1.7}
+  .up{color:#22c55e}.down{color:#ef4444}.neutral{color:#fbbf24}
+  .badge{display:inline-block;border:1px solid #334155;padding:2px 6px;font-size:.5rem;text-transform:uppercase;color:#94a3b8}
+  .badge.supported{border-color:#14532d;color:#22c55e}.badge.watch{border-color:#713f12;color:#fbbf24}
+  .result{cursor:pointer}.result:hover{border-color:#475569}
+  .method{font-size:.56rem;color:#475569;line-height:1.55}
+  .split{display:grid;grid-template-columns:minmax(0,2fr) minmax(280px,1fr);gap:12px}
+  @media(max-width:800px){.split{grid-template-columns:1fr}.toolbar{align-items:flex-start;flex-direction:column}.nav{overflow-x:auto}.result-grid,.change-list{grid-template-columns:1fr}}
+  @media(max-width:600px){header h1{display:none}header{justify-content:flex-end}.nav a{padding:5px 9px;font-size:.67rem}}
+</style>
+</head>
+<body>
+<header>
+  <h1>{{ name }}</h1>
+  <div class="nav">
+    <a href="/status">Level</a>
+    <a href="/">Dashboard</a>
+    <a href="/correlations">Correlations</a>
+    <a href="/analytics" class="on">Analytics</a>
+  </div>
+</header>
+
+<div class="toolbar">
+  <div class="tabs">
+    <button class="on" data-view="shifts">Shifts</button>
+    <button data-view="regularity">Regularity</button>
+    <button data-view="rhythm">Rhythm</button>
+    <button data-view="lagged">Lagged</button>
+  </div>
+  <div class="plbl" id="global-state">Advanced Analytics</div>
+</div>
+
+<section class="view on" id="view-shifts">
+  <div class="panel">
+    <div class="panel-head"><div class="plbl">Baseline Shifts</div><select id="shift-metric"></select></div>
+    <div class="stats-grid" id="shift-stats"></div>
+    <div id="shift-chart"></div>
+  </div>
+  <div class="panel"><div class="plbl" style="margin-bottom:10px">Detected Regimes</div><div class="change-list" id="shift-list"></div></div>
+</section>
+
+<section class="view" id="view-regularity">
+  <div class="stats-grid" id="sri-stats"></div>
+  <div class="panel"><div class="plbl">Sleep Regularity</div><div id="sri-chart"></div></div>
+  <div class="panel"><div class="plbl">Main Sleep Pattern</div><div id="sri-raster"></div></div>
+</section>
+
+<section class="view" id="view-rhythm">
+  <div class="stats-grid" id="rhythm-stats"></div>
+  <div class="panel"><div class="plbl">Observed Heart-Rate Rhythm</div><div id="rhythm-chart"></div></div>
+  <div class="panel"><div class="plbl">Rolling 30-Day Rhythm</div><div id="rhythm-trend"></div></div>
+</section>
+
+<section class="view" id="view-lagged">
+  <div class="panel">
+    <div class="panel-head"><div class="plbl">VAR / Granger Models</div><select id="lagged-model"><option value="all">All model families</option></select></div>
+    <div class="stats-grid" id="lagged-stats"></div>
+    <div class="result-grid" id="lagged-results"></div>
+  </div>
+  <div class="panel" id="irf-panel" style="display:none"><div class="plbl" id="irf-title">Impulse Response</div><div id="irf-chart"></div><div class="method" id="irf-method"></div></div>
+</section>
+
+<script>
+const $ = id => document.getElementById(id)
+const charts = {}
+const COLORS = {cyan:'#22d3ee',blue:'#38bdf8',green:'#22c55e',red:'#ef4444',yellow:'#fbbf24',purple:'#a78bfa',text:'#94a3b8',grid:'#1a1a24'}
+const NICE = {
+  readiness_score:'Readiness',sleep_score:'Sleep Score',hrv:'HRV',lowest_hr:'Lowest HR',
+  steps:'Steps',strength_sets:'Strength Sets',pure_alcohol_ml:'Pure Alcohol',thc_mg:'THC',nicotine_mg:'Nicotine'
+}
+const base = type => ({chart:{type,height:300,background:'transparent',toolbar:{show:false},animations:{enabled:false},fontFamily:'Orbitron,sans-serif'},theme:{mode:'dark'},grid:{borderColor:COLORS.grid,strokeDashArray:4},dataLabels:{enabled:false},legend:{labels:{colors:COLORS.text}},tooltip:{theme:'dark'}})
+function draw(id, options){if(charts[id])charts[id].destroy();charts[id]=new ApexCharts($(id),options);charts[id].render()}
+function stat(label,value,detail=''){return `<div class="stat"><span>${label}</span><b>${value ?? 'n/a'}</b>${detail?`<small>${detail}</small>`:''}</div>`}
+function hour(value){if(value==null)return 'n/a';const h=Math.floor(value)%24,m=Math.round((value-Math.floor(value))*60);const d=new Date(2000,0,1,h,m);return d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}
+function number(value,digits=1){return value==null?'n/a':Number(value).toFixed(digits)}
+function probability(value){if(value==null)return 'n/a';if(Number(value)<.00001)return '<0.00001';return Number(value).toFixed(Number(value)<.01?5:3)}
+function showView(name){document.querySelectorAll('.view').forEach(v=>v.classList.toggle('on',v.id===`view-${name}`));document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on',b.dataset.view===name))}
+document.querySelectorAll('.tabs button').forEach(button=>button.onclick=()=>showView(button.dataset.view))
+
+async function loadShifts(metric='hrv'){
+  const data=await fetch(`/api/analytics/change-points?metric=${metric}&days=180`).then(r=>r.json())
+  if(!$('shift-metric').options.length){Object.entries(data.available_metrics).forEach(([key,m])=>$('shift-metric').add(new Option(m.label,key)));$('shift-metric').value=metric}
+  $('shift-stats').innerHTML=stat('Metric',data.label)+stat('Observations',data.observations,`minimum ${data.minimum_observations}`)+stat('Stable shifts',data.changes.length)+stat('Window',`${data.days} days`)
+  const points=data.series.map(p=>[new Date(`${p.day}T12:00:00`).getTime(),p.value])
+  const opts={...base('line'),series:[{name:data.label,data:points,color:COLORS.cyan}],stroke:{width:2.5,curve:'smooth'},markers:{size:0},xaxis:{type:'datetime',labels:{style:{colors:COLORS.text}}},yaxis:{labels:{style:{colors:COLORS.text},formatter:v=>number(v,1)},title:{text:data.unit,style:{color:COLORS.text}}},annotations:{xaxis:data.changes.map(c=>({x:new Date(`${c.day}T12:00:00`).getTime(),borderColor:c.favorable===true?COLORS.green:c.favorable===false?COLORS.red:COLORS.yellow,label:{text:`${c.delta>0?'+':''}${c.delta}`,style:{background:'#131318',color:c.delta>0?COLORS.green:COLORS.red}}}))}}
+  draw('shift-chart',opts)
+  $('shift-list').innerHTML=data.changes.length?data.changes.map(c=>`<div class="change"><div class="change-title">${c.day} <span class="${c.delta>0?'up':'down'}">${c.direction}</span></div><div class="change-meta">${number(c.before,2)} → ${number(c.after,2)} ${data.unit}<br>${c.percent_change==null?'':`${c.percent_change>0?'+':''}${c.percent_change}% · `}${c.magnitude} shift · effect ${c.robust_effect}</div></div>`).join(''):`<div class="empty">${data.reason||'No stable baseline shifts detected.'}</div>`
+}
+$('shift-metric').onchange=e=>loadShifts(e.target.value)
+
+function sleepRanges(states,day){const data=[];let start=null;for(let i=0;i<=states.length;i++){const asleep=i<states.length&&states[i]==='1';if(asleep&&start===null)start=i;if(!asleep&&start!==null){data.push({x:day,y:[start/12,i/12]});start=null}}return data}
+async function loadSRI(){
+  const data=await fetch('/api/analytics/sleep-regularity?days=60').then(r=>r.json())
+  const last=data.trend[data.trend.length-1]||{}
+  $('sri-stats').innerHTML=stat('Overall SRI',data.sri)+stat('7-Day',last.sri_7d)+stat('14-Day',last.sri_14d)+stat('Valid pairs',data.valid_day_pairs,`${data.epoch_pairs} epochs`)
+  const opts={...base('line'),series:[{name:'7-Day SRI',data:data.trend.map(r=>[new Date(`${r.day}T12:00:00`).getTime(),r.sri_7d]),color:COLORS.cyan},{name:'30-Day SRI',data:data.trend.map(r=>[new Date(`${r.day}T12:00:00`).getTime(),r.sri_30d]),color:COLORS.purple}],stroke:{width:[2.5,2],curve:'smooth'},markers:{size:0},xaxis:{type:'datetime',labels:{style:{colors:COLORS.text}}},yaxis:{min:0,max:100,labels:{style:{colors:COLORS.text}}}}
+  draw('sri-chart',opts)
+  const ranges=data.raster.flatMap(row=>sleepRanges(row.states,row.day))
+  const raster={...base('rangeBar'),chart:{...base('rangeBar').chart,height:Math.max(260,data.raster.length*18)},series:[{name:'Main sleep',data:ranges,color:COLORS.blue}],plotOptions:{bar:{horizontal:true,barHeight:'72%',rangeBarGroupRows:true}},xaxis:{type:'numeric',min:0,max:24,tickAmount:8,labels:{style:{colors:COLORS.text},formatter:v=>hour((12+Number(v))%24)}},yaxis:{labels:{style:{colors:COLORS.text,fontSize:'9px'}}},grid:{borderColor:COLORS.grid},tooltip:{custom:({dataPointIndex})=>{const p=ranges[dataPointIndex];return p?`<div style="padding:8px 10px;font-size:11px">${p.x}<br>${hour((12+p.y[0])%24)} – ${hour((12+p.y[1])%24)}</div>`:''}}}
+  draw('sri-raster',raster)
+}
+
+async function loadRhythm(){
+  const data=await fetch('/api/analytics/circadian?days=90').then(r=>r.json())
+  $('rhythm-stats').innerHTML=stat('Mesor',`${number(data.mesor)} bpm`)+stat('Amplitude',`${number(data.amplitude)} bpm`)+stat('Peak',hour(data.peak_hour))+stat('Nadir',hour(data.nadir_hour))+stat('Fit',data.r2==null?'n/a':`${Math.round(data.r2*100)}% R²`)+stat('Coverage',`${data.days} days`,`${data.covered_bins}/96 clock bins`)
+  if(data.status!=='ready'){$('rhythm-chart').innerHTML=`<div class="empty">${data.reason}</div>`;return}
+  const opts={...base('line'),series:[{name:'Observed median',data:data.curve.map(p=>[p.hour,p.observed]),color:COLORS.blue},{name:'Cosinor fit',data:data.curve.map(p=>[p.hour,p.fitted]),color:COLORS.yellow}],stroke:{width:[1.5,3],curve:'smooth'},markers:{size:0},xaxis:{type:'numeric',min:0,max:24,tickAmount:8,labels:{style:{colors:COLORS.text},formatter:hour}},yaxis:{labels:{style:{colors:COLORS.text},formatter:v=>`${Math.round(v)}`},title:{text:'bpm',style:{color:COLORS.text}}}}
+  draw('rhythm-chart',opts)
+  const trend={...base('line'),series:[{name:'Peak Hour',data:data.trend.map(p=>[new Date(`${p.day}T12:00:00`).getTime(),p.peak_hour]),color:COLORS.purple},{name:'Amplitude',data:data.trend.map(p=>[new Date(`${p.day}T12:00:00`).getTime(),p.amplitude]),color:COLORS.green}],stroke:{width:2.5,curve:'smooth'},markers:{size:4},xaxis:{type:'datetime',labels:{style:{colors:COLORS.text}}},yaxis:[{seriesName:'Peak Hour',min:0,max:24,tickAmount:6,labels:{style:{colors:COLORS.text},formatter:hour}},{seriesName:'Amplitude',opposite:true,labels:{style:{colors:COLORS.text},formatter:v=>number(v,1)}}]}
+  draw('rhythm-trend',trend)
+}
+
+function renderIRF(result){
+  $('irf-panel').style.display='block';$('irf-title').textContent=`${NICE[result.predictor]||result.predictor} → ${NICE[result.outcome]||result.outcome}`
+  const opts={...base('bar'),series:[{name:'Standardized response',data:result.irf.map(p=>[p.day,p.response]),color:result.direction==='higher'?COLORS.green:COLORS.red}],plotOptions:{bar:{columnWidth:'45%'}},xaxis:{type:'numeric',tickAmount:result.irf.length-1,labels:{style:{colors:COLORS.text},formatter:v=>`Day ${Math.round(v)}`}},yaxis:{labels:{style:{colors:COLORS.text},formatter:v=>number(v,3)}},annotations:{yaxis:[{y:0,borderColor:'#64748b'}]}}
+  draw('irf-chart',opts);$('irf-method').textContent=`Non-orthogonalized model response · q=${probability(result.q)} · held-out gain ${number(result.prediction_gain_pct)}% · ${result.supported?'supported signal':'exploratory'}`
+}
+async function loadLagged(model='all'){
+  const data=await fetch(`/api/analytics/granger?model=${model}&max_lag=3`).then(r=>r.json())
+  if($('lagged-model').options.length===1){Object.entries(data.available_models).forEach(([key,m])=>$('lagged-model').add(new Option(m.label,key)));$('lagged-model').value=model}
+  const supported=data.results.filter(r=>r.supported).length
+  $('lagged-stats').innerHTML=stat('Daily history',data.total_days)+stat('Models ready',data.models.filter(m=>m.status==='ready').length,`${data.models.length} evaluated`)+stat('Tests',data.results.length)+stat('Supported',supported,'q < 0.10 + diagnostics + prediction')
+  $('lagged-results').innerHTML=data.results.length?data.results.map((r,i)=>`<div class="result" data-result="${i}"><div class="result-title">${NICE[r.predictor]||r.predictor} → <span class="${r.direction==='higher'?'up':'down'}">${r.direction}</span> ${NICE[r.outcome]||r.outcome}</div><div class="result-meta"><span class="badge ${r.supported?'supported':'watch'}">${r.supported?'supported':'exploratory'}</span><br>lag ${r.lag}d · n=${r.n} · F=${r.f}<br>p=${probability(r.p)} · q=${probability(r.q)} · gain ${number(r.prediction_gain_pct)}%</div></div>`).join(''):'<div class="empty">No eligible VAR tests for this model family.</div>'
+  document.querySelectorAll('[data-result]').forEach(el=>el.onclick=()=>renderIRF(data.results[Number(el.dataset.result)]))
+}
+$('lagged-model').onchange=e=>loadLagged(e.target.value)
+
+Promise.all([loadShifts(),loadSRI(),loadRhythm(),loadLagged()]).catch(error=>{$('global-state').textContent='Analytics unavailable';console.error(error)})
+</script>
+</body>
+</html>

@@ -4,11 +4,12 @@ Codex operating notes for this repository.
 
 ## Project Summary
 
-`h_tracker` is a self-hosted health analytics app for Oura Ring data plus manual logs. It syncs Oura API data into local SQLite, adds custom logs for meals, substances, sex, journal notes, and workout sets, then serves a Flask dashboard with:
+`h_tracker` is a self-hosted health analytics app for Oura Ring data plus manual logs. It syncs Oura API data into local SQLite, adds custom logs for meals, substances, travel, journal notes, and workout sets, then serves a Flask dashboard with:
 
 - `/` continuous timeline dashboard
 - `/status` Solo Leveling-style health RPG page
 - `/correlations` Pearson and normalized mutual information explorer
+- `/analytics` change points, sleep regularity, circadian rhythm, VAR/Granger, and impulse responses
 
 This repo is intentionally agent-operated. Most user-facing work should be done by reading the data, running targeted queries or helper functions, and reporting concrete findings.
 
@@ -19,14 +20,19 @@ This repo is intentionally agent-operated. Most user-facing work should be done 
 | `auth.py` | One-time Oura OAuth2 flow; writes `tokens.json`. |
 | `oura_client.py` | Oura API v2 client with pagination and graceful unavailable-endpoint handling. |
 | `db.py` | SQLite schema, connection helper, upserts, and manual logging helpers. |
+| `sync_all.py` | Combined Oura + Withings sync runner for background jobs. |
 | `sync.py` | Incremental/full Oura sync and sync status. |
+| `withings_auth.py` | One-time Withings OAuth2 flow; writes `withings_tokens.json`. |
+| `withings_client.py` | Withings Public API client with signed token refresh and Body Comp fetch. |
+| `withings_sync.py` | Incremental/full Withings Body Comp sync and sync status. |
 | `check.py` | Text snapshot CLI for recent health data. |
 | `nutrition.py` | USDA FoodData Central lookup, meal logging, nutrition scoring. |
+| `advanced_analytics.py` | PELT change points, SRI, cosinor, stationary VAR/Granger, and impulse-response analysis. |
 | `time_utils.py` | Shared timestamp parsing, timezone-aware ISO normalization, and local day derivation. |
 | `profile_targets.py` | Loads numeric target overrides from a fenced YAML block in `PROFILE.md`. |
 | `leveling.py` | VIT/STR/END/NUT/DIS stat and XP engine. |
 | `dashboard.py` | Flask app and JSON APIs for the dashboard. |
-| `templates/` | Frontend HTML for dashboard, status, and correlations pages. |
+| `templates/` | Frontend HTML for dashboard, status, correlations, and analytics pages. |
 | `scripts/backfill_micros.py` | One-off USDA micronutrient backfill script. |
 | `scripts/dump_schema.py` | Prints SQLite table columns/types for schema-doc drift checks. |
 | `static/base.css` | Shared theme primitives used by the dashboard templates. |
@@ -41,6 +47,7 @@ Treat the following as private local state:
 
 - `.env`
 - `tokens.json`
+- `withings_tokens.json`
 - `PROFILE.md`
 - `health.db`, WAL/SHM files, and backups
 - `sync.log`
@@ -61,9 +68,16 @@ Common commands:
 
 ```bash
 python3 auth.py              # one-time Oura auth, opens browser
+python3 sync_all.py          # incremental Oura + Withings sync
+python3 sync_all.py --full   # full sync for all configured sources
+python3 sync_all.py --status # sync state and row counts for all sources
 python3 sync.py              # incremental sync
 python3 sync.py --full       # full sync from RING_START_DATE
 python3 sync.py --status     # sync state and row counts
+python3 withings_auth.py     # one-time Withings auth, via Funnel/public callback
+python3 withings_sync.py     # incremental Withings Body Comp sync
+python3 withings_sync.py --full
+python3 withings_sync.py --status
 python3 check.py 7           # recent text snapshot
 python3 dashboard.py         # serves http://localhost:8000
 python3 leveling.py          # print leveling snapshot JSON
@@ -91,7 +105,8 @@ Main tables:
 - `sleep_periods`
 - `heartrate`
 - `workouts`, `sessions`, `sleep_time`
-- `meals`, `meal_items`, `substances`, `sex`, `journal`, `workout_sets`
+- `meals`, `meal_items`, `substances`, `travel`, `journal`, `workout_sets`
+- `withings_sync_state`, `withings_measure_groups`, `withings_measure_items`, `withings_body_composition`
 - `leveling_daily_cache`
 
 Important schema notes:
@@ -187,11 +202,52 @@ When a meal has `meal_items`, item rows are the detailed source and `db.rollup_m
 
 `id PK | logged_at | substance | amount_deprecated | notes | created_at | amount_value | amount_unit | potency_pct`
 
-`sex` stores custom sex or masturbation logs:
+`travel` stores manual travel events such as flights, drives, trains, or bus trips:
 
-`id PK | logged_at | type | duration_min | notes | created_at`
+`id PK | day | start_datetime | end_datetime | travel_type | origin | destination | hours | timezone_shift_hours | direction | notes | created_at`
 
-Valid `type` values currently used by the helper are `sex` and `goon`.
+Use city-level `origin` and `destination` values rather than exact addresses or personal route details. `day` is derived with `time_utils.event_local_day(start_datetime)` so travel near midnight groups to the calendar day in the place where the travel began, not necessarily the configured home timezone.
+
+For travel across time zones, store manual log timestamps in the timezone where the user was at the time of the event. For example, an SF dinner should be stored as `2026-06-14T22:30:00-07:00`; a Toronto post-flight meal should be stored as `2026-06-18T02:45:00-04:00`. This preserves the user's local clock time and makes large offsets analyzable without shifting meals/substances onto the wrong local day. Treat timezone shifts of 6 hours or more as "big timezone shift" / jet-lag-class travel. When the user only gives local times during travel, infer the offset from their stated city; if the city/timezone is unknown, ask before logging.
+
+When the user gives a flight time and a door-to-door travel duration, treat the stated time as the flight departure time, not the start of travel, unless they explicitly say otherwise. Default the door-to-door travel envelope to start 3 hours before the flight. Split component rows as pre-flight ground/airport friction, flight time, and any remaining post-arrival ground transit so `travel_hours` can capture the full door-to-door load without losing `flight_hours`.
+
+Travel variables exposed in `/api/correlations`:
+
+- `travel_count`, `travel_hours`, `flight_hours`, `timezone_shift_abs`
+- `big_timezone_shift`, `travel_yesterday`, `travel_hours_yesterday`, `flight_hours_yesterday`, `timezone_shift_abs_yesterday`, `big_timezone_shift_yesterday`
+- `days_since_travel`, `post_travel_1_3d`
+
+`withings_sync_state` tracks the latest successful Withings sync:
+
+`endpoint TEXT PK | last_synced_at | last_update_unix`
+
+`withings_measure_groups` stores raw Withings measurement groups:
+
+`grpid PK | measured_at | day | created_at_api | modified_at_api | attrib | category | deviceid | model | raw_json | synced_at`
+
+`withings_measure_items` stores one raw item per Withings type:
+
+`grpid FK->withings_measure_groups(grpid) | measure_type | value_raw | unit | value | algo | fw | PK(grpid, measure_type)`
+
+`withings_body_composition` stores flattened Body Comp values:
+
+`grpid PK | measured_at | day | weight_kg | fat_free_mass_kg | fat_ratio_pct | fat_mass_kg | muscle_mass_kg | muscle_pct | hydration_kg | water_pct | bone_mass_kg | pulse_wave_velocity_ms | raw_json | synced_at`
+
+Withings measure values are stored as `value * 10^unit`. Known Body Comp types:
+
+| Type | Field |
+| --- | --- |
+| `1` | `weight_kg` |
+| `5` | `fat_free_mass_kg` |
+| `6` | `fat_ratio_pct` |
+| `8` | `fat_mass_kg` |
+| `76` | `muscle_mass_kg` |
+| `77` | `hydration_kg` |
+| `88` | `bone_mass_kg` |
+| `91` | `pulse_wave_velocity_ms` |
+
+`water_pct` and `muscle_pct` are derived from kg values divided by `weight_kg`.
 
 `journal` stores free-text notes and detailed nutrition breakdowns:
 
@@ -230,6 +286,37 @@ Endpoint availability as implemented:
 | `daily_resilience` | Supported, may be blocked | Depends on stress/resilience access. |
 | `vO2_max` | Supported | Case-sensitive endpoint. |
 | `ring_configuration` | Client method only | May require extra scope. |
+
+### Withings API Sync Notes
+
+Withings uses OAuth2 with signed token requests. Required `.env` fields:
+
+```bash
+WITHINGS_CLIENT_ID=...
+WITHINGS_CLIENT_SECRET=...
+WITHINGS_REDIRECT_URI=https://your-public-host.example/callback
+WITHINGS_API_BASE=https://wbsapi.withings.net
+```
+
+Use scopes `user.info,user.metrics`. The authorization URL is generated by
+`withings_auth.py`; the local callback server listens on port `8081`, behind
+your HTTPS callback host, such as Tailscale Funnel. The callback endpoint
+supports `HEAD /callback` for Withings URL validation and `GET /callback` for
+OAuth.
+
+Withings access tokens expire quickly and refresh tokens rotate. Always persist
+the newest refresh token returned by Withings; `withings_client.py` does this on
+every client run.
+
+`withings_sync.py` uses `measure/getmeas` with `category=1`, `lastupdate`, and
+Body Comp `meastypes=1,5,6,8,76,77,88,91`. Unknown returned measure types are
+still preserved in `withings_measure_items`.
+
+Dashboard/API exposure:
+
+- `/api/body-composition/<days>` returns the latest Withings body-composition row per day.
+- The dashboard renders a Body Composition chart for weight, fat %, muscle %, and water %.
+- `/api/correlations` includes `weight_kg`, `fat_ratio_pct`, `fat_mass_kg`, `fat_free_mass_kg`, `muscle_mass_kg`, `muscle_pct`, `hydration_kg`, `water_pct`, `bone_mass_kg`, and `pulse_wave_velocity_ms`.
 
 ## Health Analysis Workflow
 
@@ -543,6 +630,8 @@ For user-reported workouts, create or reuse a manual parent row in `workouts` wi
 
 Substances:
 
+When the user omits a substance dose, inherit the amount, unit, and potency from the most recent prior entry for that same substance. Do not leave the dose blank unless no prior dose exists.
+
 ```python
 from db import log_substance
 
@@ -556,16 +645,21 @@ log_substance(
 )
 ```
 
-Sex or masturbation:
+Travel:
 
 ```python
-from db import log_sex
+from db import log_travel
 
-log_sex(
-    logged_at="2026-04-25T23:15:00-04:00",
-    type="sex",
-    duration_min=25,
-    notes=None,
+log_travel(
+    start_datetime="2026-04-25T18:00:00-04:00",
+    end_datetime="2026-04-25T21:30:00-04:00",
+    travel_type="flight",
+    origin="Toronto",
+    destination="New York",
+    hours=1.5,
+    timezone_shift_hours=0,
+    direction="none",
+    notes="evening flight",
 )
 ```
 
@@ -719,10 +813,10 @@ High-value analysis usually connects tables:
 - Substance timing -> REM, HRV, resting HR, sleep score.
 - Last meal timing -> sleep efficiency, lowest HR, next-day readiness.
 - Training load -> next-day readiness and HRV.
+- Travel hours/time zone shift -> next-night HRV, bedtime, sleep score, and recovery duration.
 - Nutrition quality -> 3-5 day HRV/readiness trends.
 - Bedtime consistency -> weekly readiness.
 - Steps/activity -> same-night sleep quality.
-- Sex/masturbation timing -> sleep latency, HRV, readiness, if enough data exists.
 
 Be cautious with small samples. Report `n`, effect size, direction, and whether the relationship is stable or anecdotal.
 
@@ -766,15 +860,24 @@ Existing:
 - Pairwise sample sizes in `/api/correlations` as `counts`; the UI greys out cells with `n < 14`.
 - Same-day and next-day lag option through `lag` query parameter.
 - Interactive heatmap and scatter plot frontend.
+- PELT baseline-shift detection with robust scaling, 14-day minimum regimes, and penalty-stability screening.
+- Phillips Sleep Regularity Index from five-minute Oura sleep/wake epochs.
+- Twenty-four-hour cosinor fit over equal-weighted, non-workout heart-rate clock bins.
+- Targeted stationary VAR models with BIC lag selection, Granger F-tests, Benjamini-Hochberg correction, residual diagnostics, held-out prediction checks, and non-orthogonalized impulse responses.
+- Dedicated `/analytics` page and focused `/api/analytics/*` routes.
+
+Readiness thresholds and interpretation:
+
+- Change points require at least 42 observations in a contiguous regime; sparse Withings metrics return `collecting` until ready.
+- SRI needs at least four adjacent valid sleep-day pairs for display.
+- Cosinor needs at least 14 days and 48 of 96 quarter-hour clock bins.
+- VAR models require at least 60 contiguous complete days. A result is `supported` only when corrected `q < 0.10`, the model is stable, residual diagnostics pass, and held-out prediction improves.
+- Granger and impulse-response results are predictive observational models, not physical causal estimates.
 
 Future directions described by the original project:
 
-- At ~30+ days: change point detection, sleep regularity index, circadian rhythm analysis.
-- At ~60+ days: VAR and Granger causality for lagged prediction.
 - At ~90+ days: causal-impact style intervention analysis.
 - At 6+ months: regularized multivariable causal discovery and richer recurrence/coupling analyses.
-
-If implementing these, keep them Python-side first, expose narrow JSON routes, and only then add dashboard UI.
 
 ## Communication Style for User-Facing Analysis
 

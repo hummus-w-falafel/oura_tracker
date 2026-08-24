@@ -2,7 +2,7 @@
 
 A self-hosted health analytics platform for the [Oura Ring](https://ouraring.com/) and Withings scale data, built to be operated by an AI agent.
 
-It pulls everything Oura's API exposes — sleep, readiness, activity, HR, HRV, SpO2, workouts, sessions, vO2 max, vascular age — plus Withings Body Comp measurements into a local SQLite database, augments it with custom logging for meals, workouts, substances, travel, and journal entries, and serves it through a Flask dashboard.
+It pulls everything Oura's API exposes — sleep, readiness, activity, HR, HRV, SpO2, workouts, sessions, vO2 max, vascular age — plus Withings Body Comp measurements into a local SQLite database, augments it with custom logging (meals with USDA-backed or item-level nutrition, workouts with set/rep tracking, substances, travel, journal entries), and serves it through a Flask dashboard with timeline, RPG status, correlation, and advanced time-series views.
 
 The whole thing is designed to be driven by a coding agent. `CLAUDE.md` is tuned for Claude Code; `AGENTS.md` is the Codex-facing equivalent. The agent logs your meals, runs your queries, surfaces patterns. If you have any questions or want to make any changes just ask the agent!
 
@@ -15,7 +15,7 @@ The whole thing is designed to be driven by a coding agent. `CLAUDE.md` is tuned
 - **Custom nutrition scoring** — sigmoid/gaussian curves over macros + micros (AHEI-2010 inspired)
 - **Solo Leveling RPG layer** — VIT/STR/END/NUT/DIS stats, XP, levels, ranks (see `LEVELING.md`)
 - **Correlation engine** — Pearson + normalized mutual information across ~30 daily features, with same-day and next-day lag
-- **Travel-aware analysis** — flight hours and time-zone shifts can be compared against later sleep and recovery
+- **Advanced analytics** — stable baseline shifts, Sleep Regularity Index, 24-hour heart-rate cosinor, corrected VAR/Granger tests, and impulse responses
 - **Agent-first design** — `CLAUDE.md` and `AGENTS.md` are operating prompts; every script is structured for programmatic use
 
 ## Setup
@@ -40,9 +40,10 @@ cp .env.example .env
 python3 auth.py
 
 # 5. Optional: authenticate Withings (one-time, opens a browser)
+# Requires WITHINGS_CLIENT_ID, WITHINGS_CLIENT_SECRET, and WITHINGS_REDIRECT_URI
 python3 withings_auth.py
 
-# 6. Initial sync (pulls all configured sources)
+# 6. Initial sync (pulls all historical data)
 python3 sync_all.py --full
 
 # 7. Create your profile so the agent can personalize analysis
@@ -87,10 +88,10 @@ Logging meals, workouts, and substances is done through the agent — point it a
                                                   ▼
                                              dashboard.py  (Flask, uses leveling + nutrition scoring)
                                                   │
-                                 ┌────────────────┼────────────────┐
-                                 ▼                ▼                ▼
-                                 /             /status       /correlations
-                             (timeline)       (RPG stats)    (Pearson + MI)
+                           ┌──────────────┬──────────────┬──────────────┐
+                           ▼              ▼              ▼              ▼
+                           /           /status     /correlations   /analytics
+                       (timeline)     (RPG stats)  (Pearson + MI)  (time series)
 ```
 
 See `CLAUDE.md` or `AGENTS.md` for the full database schema, sync strategy, and analytical patterns.
@@ -109,9 +110,10 @@ See `CLAUDE.md` or `AGENTS.md` for the full database schema, sync strategy, and 
 | `withings_sync.py` | Incremental + full Withings scale sync |
 | `check.py` | Text snapshot CLI |
 | `nutrition.py` | USDA lookup + scoring engine |
+| `advanced_analytics.py` | Change points, SRI, cosinor, VAR/Granger, and impulse responses |
 | `leveling.py` | RPG stat/XP/level engine |
 | `dashboard.py` | Flask app |
-| `templates/` | Dashboard HTML (3 pages) |
+| `templates/` | Dashboard HTML, including the dedicated advanced analytics page |
 | `scripts/` | One-shot maintenance scripts |
 | `CLAUDE.md` | Claude Code operating prompt |
 | `AGENTS.md` | Codex operating prompt |

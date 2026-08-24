@@ -392,6 +392,10 @@ targets:
         self.assertIn("flight_hours_yesterday", payload["features"])
         self.assertIn("big_timezone_shift_yesterday", payload["features"])
         self.assertIn("post_travel_1_3d", payload["features"])
+        self.assertIn("weight_kg", payload["features"])
+        self.assertIn("fat_ratio_pct", payload["features"])
+        self.assertIn("muscle_pct", payload["features"])
+        self.assertIn("water_pct", payload["features"])
 
     def test_daily_feature_matrix_derives_travel_recovery_features(self):
         with self.db.get_conn() as conn:
@@ -455,8 +459,20 @@ targets:
         response = client.get("/api/granger")
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.data)
-        self.assertIn("mature_days", payload)
+        self.assertEqual(payload["status"], "collecting")
         self.assertIn("results", payload)
+
+    def test_advanced_analytics_routes_smoke(self):
+        client = self.dashboard.app.test_client()
+        self.assertEqual(client.get("/analytics").status_code, 200)
+        for path in (
+            "/api/analytics/change-points?metric=hrv&days=90",
+            "/api/analytics/sleep-regularity?days=30",
+            "/api/analytics/circadian?days=30",
+            "/api/analytics/granger?model=recovery",
+        ):
+            response = client.get(path)
+            self.assertEqual(response.status_code, 200, path)
 
     def test_dashboard_strength_api_smoke(self):
         today = date.today().isoformat()

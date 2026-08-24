@@ -8,6 +8,14 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 from db import get_conn
 from nutrition import compute_nutrition_score
+from advanced_analytics import (
+    VAR_MODELS,
+    compute_sleep_regularity,
+    cosinor_trend,
+    detect_change_points,
+    fit_cosinor,
+    run_var_analysis,
+)
 
 app = Flask(__name__)
 TZ  = ZoneInfo(os.environ.get("TIMEZONE", "America/Toronto"))
@@ -19,6 +27,18 @@ BODY_COMP_FIELDS = [
     "muscle_mass_kg", "muscle_pct", "hydration_kg", "water_pct",
     "bone_mass_kg", "pulse_wave_velocity_ms",
 ]
+ANALYTICS_METRICS = {
+    "hrv": {"label": "HRV", "unit": "ms", "higher_is_better": True},
+    "lowest_hr": {"label": "Lowest HR", "unit": "bpm", "higher_is_better": False},
+    "sleep_score": {"label": "Sleep Score", "unit": "", "higher_is_better": True},
+    "readiness_score": {"label": "Readiness", "unit": "", "higher_is_better": True},
+    "bedtime_hour": {"label": "Bedtime", "unit": "hour", "higher_is_better": None},
+    "steps": {"label": "Steps", "unit": "steps", "higher_is_better": True},
+    "active_cal": {"label": "Active Calories", "unit": "kcal", "higher_is_better": True},
+    "weight_kg": {"label": "Weight", "unit": "kg", "higher_is_better": None},
+    "fat_ratio_pct": {"label": "Body Fat", "unit": "%", "higher_is_better": False},
+    "muscle_pct": {"label": "Muscle", "unit": "%", "higher_is_better": True},
+}
 
 def q(sql, params=()):
     with get_conn() as con:
@@ -52,6 +72,7 @@ def latest_body_composition_by_day(since: str = None):
     for row in rows:
         latest[row["day"]] = row
     return latest
+
 
 def sleep_runs(since):
     """Parse all sleep nights since a date into stage runs."""
@@ -390,9 +411,15 @@ def leveling_api():
     return jsonify(compute_snapshot())
 
 
+
 @app.route("/correlations")
 def correlations_page():
     return render_template("correlations.html", name=DISPLAY_NAME)
+
+
+@app.route("/analytics")
+def analytics_page():
+    return render_template("analytics.html", name=DISPLAY_NAME)
 
 
 def build_daily_feature_matrix():
@@ -487,7 +514,7 @@ def build_daily_feature_matrix():
     )}
 
     all_days = sorted(set(
-        set(sleep) | set(sleep_scores) | set(readiness) | set(activity) | set(body_comp) | set(travel_by_day)
+        set(sleep) | set(sleep_scores) | set(readiness) | set(activity) | set(travel_by_day) | set(body_comp)
     ))
 
     features = [
@@ -527,8 +554,8 @@ def build_daily_feature_matrix():
         w = workouts_by_day.get(day, {})
         ws = sets_by_day.get(day, {})
         sb = subs_by_day.get(day, {})
-        bc = body_comp.get(day, {})
         tr = travel_by_day.get(day, {})
+        bc = body_comp.get(day, {})
 
         row["sleep_score"] = sleep_scores.get(day)
         row["readiness_score"] = r_data.get("score") if isinstance(r_data, dict) else None
@@ -738,151 +765,119 @@ def correlations_api():
 
 @app.route("/api/granger")
 def granger_api():
-    import numpy as np
-    from scipy import stats
+    return analytics_granger()
 
-    max_lag = max(1, min(int(request.args.get("max_lag", 2)), 3))
-    min_obs = 12
-    mature_days = 60
-    all_days, features, rows = build_daily_feature_matrix()
-    day_rows = {day: row for day, row in zip(all_days, rows)}
 
-    core_predictors = [
-        "thc_mg", "weed_count",
-        "pure_alcohol_ml", "alcohol_count",
-        "nicotine_mg", "nicotine_count",
-        "last_meal_hour", "eating_window_hours",
-        "workout_count", "workout_minutes", "workout_calories", "strength_sets",
-        "steps", "active_cal", "sedentary_hrs", "bedtime_hour",
+def _analytics_window(default=180, minimum=7, maximum=365):
+    try:
+        value = int(request.args.get("days", default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+@app.route("/api/analytics/change-points")
+def analytics_change_points():
+    metric = request.args.get("metric", "hrv")
+    if metric not in ANALYTICS_METRICS:
+        return jsonify({"error": "unknown metric", "available_metrics": ANALYTICS_METRICS}), 400
+    days = _analytics_window()
+    all_days, _, rows = build_daily_feature_matrix()
+    cutoff = datetime.now(TZ).date() - timedelta(days=days - 1)
+    selected = [
+        (day, row.get(metric))
+        for day, row in zip(all_days, rows)
+        if Date.fromisoformat(day) >= cutoff
     ]
-    expanded_predictors = [
-        "calories", "protein_g", "carbs_g", "fat_g", "fiber_g",
-        "sugar_g", "sat_fat_g", "sodium_mg", "potassium_mg", "magnesium_mg",
-        "meal_count", "first_meal_hour", "nutrition_score",
-    ]
-    predictors = core_predictors + expanded_predictors
-    outcomes = [
-        "readiness_score", "sleep_score", "hrv", "lowest_hr",
-        "efficiency", "rem_pct", "deep_pct",
-    ]
+    meta = ANALYTICS_METRICS[metric]
+    result = detect_change_points(
+        [item[0] for item in selected],
+        [item[1] for item in selected],
+        higher_is_better=meta["higher_is_better"],
+    )
+    result.update(metric=metric, label=meta["label"], unit=meta["unit"], days=days)
+    result["available_metrics"] = ANALYTICS_METRICS
+    return jsonify(result)
 
-    def fmt_p(value):
-        if value is None:
-            return None
-        if value < 0.0001:
-            return "<0.0001"
-        return round(float(value), 4)
 
-    def fit_model(y, x_cols):
-        x = np.column_stack([np.ones(len(y))] + x_cols)
-        coef, _, _, _ = np.linalg.lstsq(x, y, rcond=None)
-        resid = y - x @ coef
-        return float(np.sum(resid ** 2)), coef
+@app.route("/api/analytics/sleep-regularity")
+def analytics_sleep_regularity():
+    days = _analytics_window(default=30, minimum=7, maximum=180)
+    since = (datetime.now(TZ).date() - timedelta(days=days + 2)).isoformat()
+    periods = q(
+        "SELECT day, type, bedtime_start, sleep_phase_5_min"
+        " FROM sleep_periods WHERE day >= ? AND sleep_phase_5_min IS NOT NULL"
+        " ORDER BY bedtime_start",
+        (since,),
+    )
+    result = compute_sleep_regularity(periods, tz_name=str(TZ), max_days=days)
+    result["days"] = days
+    return jsonify(result)
 
-    results = []
-    for predictor in predictors:
-        if predictor not in features:
-            continue
-        for outcome in outcomes:
-            if outcome not in features or predictor == outcome:
-                continue
-            best = None
-            for lag in range(1, max_lag + 1):
-                pairs = []
-                for idx in range(lag, len(all_days)):
-                    day = all_days[idx]
-                    current_y = day_rows[day][outcome]
-                    if current_y is None:
-                        continue
-                    y_lags = []
-                    x_lags = []
-                    complete = True
-                    for back in range(1, lag + 1):
-                        lag_day = all_days[idx - back]
-                        y_lag = day_rows[lag_day][outcome]
-                        x_lag = day_rows[lag_day][predictor]
-                        if y_lag is None or x_lag is None:
-                            complete = False
-                            break
-                        y_lags.append(float(y_lag))
-                        x_lags.append(float(x_lag))
-                    if complete:
-                        pairs.append((float(current_y), y_lags, x_lags))
 
-                n = len(pairs)
-                if n < min_obs:
-                    continue
-                y = np.array([p[0] for p in pairs], dtype=float)
-                y_cols = [np.array([p[1][i] for p in pairs], dtype=float) for i in range(lag)]
-                x_cols = [np.array([p[2][i] for p in pairs], dtype=float) for i in range(lag)]
-                if np.std(y) == 0 or any(np.std(col) == 0 for col in x_cols):
-                    continue
+@app.route("/api/analytics/circadian")
+def analytics_circadian():
+    days = _analytics_window(default=90, minimum=14, maximum=180)
+    since_local = (datetime.now(TZ) - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
+    since_utc = since_local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    readings = q(
+        "SELECT timestamp, bpm, source FROM heartrate"
+        " WHERE timestamp >= ? AND source NOT IN ('workout', 'live')"
+        " ORDER BY timestamp",
+        (since_utc,),
+    )
+    result = fit_cosinor(readings, tz_name=str(TZ))
+    result["window_days"] = days
+    result["trend"] = cosinor_trend(readings, tz_name=str(TZ))
+    return jsonify(result)
 
-                restricted_sse, _ = fit_model(y, y_cols)
-                full_sse, full_coef = fit_model(y, y_cols + x_cols)
-                df_num = lag
-                df_den = n - (1 + len(y_cols) + len(x_cols))
-                if df_den <= 0 or full_sse <= 0:
-                    continue
-                f_stat = ((restricted_sse - full_sse) / df_num) / (full_sse / df_den)
-                if f_stat < 0:
-                    f_stat = 0
-                p_val = float(stats.f.sf(f_stat, df_num, df_den))
-                improvement = (restricted_sse - full_sse) / restricted_sse if restricted_sse > 0 else 0
-                exposure_days = sum(
-                    1 for day in all_days
-                    if day_rows[day].get(predictor) not in (None, 0)
-                )
-                x_coef = float(np.sum(full_coef[1 + len(y_cols):]))
-                sparse = exposure_days < 10 and predictor.endswith(("_mg", "_count", "_ml"))
-                tier = "watchlist" if sparse else ("core" if predictor in core_predictors else "expanded")
 
-                candidate = {
-                    "predictor": predictor,
-                    "outcome": outcome,
-                    "tier": tier,
-                    "lag": lag,
-                    "n": n,
-                    "exposure_days": exposure_days,
-                    "f": round(float(f_stat), 3),
-                    "p": fmt_p(p_val),
-                    "sort_p": p_val,
-                    "improvement_pct": round(max(0, improvement) * 100, 1),
-                    "direction": "higher" if x_coef > 0 else "lower",
-                    "status": "sparse" if sparse else ("maturing" if len(all_days) >= mature_days else "exploratory"),
-                    "note": "Sparse exposure: useful to watch, not enough exposed days to trust yet."
-                        if sparse else (
-                            "Exploratory: interpret directionally until 60+ daily observations."
-                            if len(all_days) < mature_days else
-                            "Mature sample: still observational, but time-series tests are more stable."
-                        ),
-                }
-                if best is None or candidate["sort_p"] < best["sort_p"]:
-                    best = candidate
-            if best:
-                del best["sort_p"]
-                results.append(best)
-
-    results.sort(key=lambda r: (
-        0 if r["p"] == "<0.0001" else (r["p"] if isinstance(r["p"], float) else 1),
-        -r["improvement_pct"],
-    ))
-    tiered = {
-        "core": [r for r in results if r["tier"] == "core"][:12],
-        "expanded": [r for r in results if r["tier"] == "expanded"][:12],
-        "watchlist": [r for r in results if r["tier"] == "watchlist"][:12],
+@app.route("/api/analytics/granger")
+def analytics_granger():
+    model_name = request.args.get("model", "all")
+    if model_name != "all" and model_name not in VAR_MODELS:
+        return jsonify({"error": "unknown model", "available_models": VAR_MODELS}), 400
+    try:
+        max_lag = max(1, min(int(request.args.get("max_lag", 3)), 3))
+    except (TypeError, ValueError):
+        max_lag = 3
+    all_days, _, rows = build_daily_feature_matrix()
+    result = run_var_analysis(all_days, rows, model_name=model_name, max_lag=max_lag)
+    result["available_models"] = {
+        key: {"label": value["label"], "variables": value["variables"]}
+        for key, value in VAR_MODELS.items()
     }
+    return jsonify(result)
+
+
+@app.route("/api/analytics/impulse-response")
+def analytics_impulse_response():
+    model_name = request.args.get("model", "recovery")
+    predictor = request.args.get("predictor")
+    outcome = request.args.get("outcome")
+    if model_name not in VAR_MODELS or not predictor or not outcome:
+        return jsonify({"error": "model, predictor, and outcome are required"}), 400
+    all_days, _, rows = build_daily_feature_matrix()
+    result = run_var_analysis(all_days, rows, model_name=model_name)
+    match = next((item for item in result["results"]
+                  if item["predictor"] == predictor and item["outcome"] == outcome), None)
+    if not match:
+        return jsonify({"error": "requested response is not available", "model": model_name}), 404
     return jsonify({
-        "total_days": len(all_days),
-        "mature_days": mature_days,
-        "max_lag": max_lag,
-        "min_obs": min_obs,
-        "predictors": predictors,
-        "core_predictors": core_predictors,
-        "expanded_predictors": expanded_predictors,
-        "outcomes": outcomes,
-        "results": results[:40],
-        "tiered": tiered,
+        "method": "non-orthogonalized standardized VAR impulse response",
+        "model": model_name,
+        "predictor": predictor,
+        "outcome": outcome,
+        "supported": match["supported"],
+        "direction": match["direction"],
+        "cumulative_response": match["cumulative_response"],
+        "irf": match["irf"],
+        "diagnostics": {
+            "q": match["q"],
+            "prediction_gain_pct": match["prediction_gain_pct"],
+            "stable": match["stable"],
+            "whiteness_p": match["whiteness_p"],
+        },
     })
 
 
